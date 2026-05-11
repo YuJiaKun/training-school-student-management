@@ -58,6 +58,16 @@ function createApp({ db }) {
       return record;
     },
 
+    listHomeworkRecords(filters = {}) {
+      const items = db.homeworkRecords.filter((record) => {
+        if (filters.studentId && record.studentId !== Number(filters.studentId)) return false;
+        if (filters.className && record.className !== filters.className) return false;
+        if (filters.submitStatus && record.submitStatus !== filters.submitStatus) return false;
+        return true;
+      });
+      return { items, total: items.length };
+    },
+
     addInterviewRecord(input) {
       const record = {
         id: db.nextInterviewId++,
@@ -72,6 +82,16 @@ function createApp({ db }) {
       };
       db.interviewRecords.push(record);
       return record;
+    },
+
+    listInterviewRecords(filters = {}) {
+      const items = db.interviewRecords.filter((record) => {
+        if (filters.studentId && record.studentId !== Number(filters.studentId)) return false;
+        if (filters.companyName && !record.companyName.includes(filters.companyName)) return false;
+        if (filters.result && record.result !== filters.result) return false;
+        return true;
+      });
+      return { items, total: items.length };
     },
 
     getDashboardStats() {
@@ -95,9 +115,31 @@ function createApp({ db }) {
       for (const student of students) {
         rows.push([student.name, student.phone, student.gender, student.className, student.enrolledAt, student.status, student.remark]);
       }
-      return rows.map((row) => row.map(csvCell).join(',')).join('\n');
+      return toCsv(rows);
+    },
+
+    exportHomeworkRecords(filters = {}) {
+      const records = this.listHomeworkRecords(filters).items;
+      const rows = [['作业名称', '学生ID', '班级/课程', '提交状态', '提交时间', '批改结果', '备注']];
+      for (const record of records) {
+        rows.push([record.homeworkName, record.studentId, record.className, record.submitStatus, record.submitAt, record.reviewResult, record.remark]);
+      }
+      return toCsv(rows);
+    },
+
+    exportInterviewRecords(filters = {}) {
+      const records = this.listInterviewRecords(filters).items;
+      const rows = [['公司', '岗位', '学生ID', '面试时间', '结果', '反馈', '入职状态', '备注']];
+      for (const record of records) {
+        rows.push([record.companyName, record.positionName, record.studentId, record.interviewAt, record.result, record.feedback, record.hiredStatus, record.remark]);
+      }
+      return toCsv(rows);
     }
   };
+}
+
+function toCsv(rows) {
+  return rows.map((row) => row.map(csvCell).join(',')).join('\n');
 }
 
 function csvCell(value) {
