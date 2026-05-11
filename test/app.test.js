@@ -1,9 +1,20 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { createDatabase } = require('../src/db');
 const { createApp } = require('../src/app');
 const { createServerApp } = require('../src/server');
+
+function createSampleScheduleApp() {
+  const db = createDatabase();
+  const app = createApp({ db });
+  const student1 = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const student2 = app.createStudent({ name: 'Bob', phone: '13800000002', className: '前端1班' });
+  return { app, student1, student2 };
+}
 
 test('student lifecycle supports create, archive, query, stats, and export', async () => {
   const db = createDatabase();
@@ -178,3 +189,177 @@ test('export routes return csv content over http', async () => {
 
   server.close();
 });
+
+test('database state can be saved and loaded from disk', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'student-management-'));
+  const filePath = path.join(tempDir, 'data.json');
+  const db = createDatabase({ filePath });
+  const app = createApp({ db });
+  app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  app.saveDatabase();
+
+  const loadedDb = createDatabase({ filePath });
+  const loadedApp = createApp({ db: loadedDb });
+
+  assert.equal(loadedApp.listStudents().total, 1);
+  assert.equal(loadedApp.listStudents().items[0].name, 'Alice');
+});
+
+test('login returns a role based session token', () => {
+  const db = createDatabase();
+  const app = createApp({ db });
+
+  const session = app.login({ username: 'admin', password: 'admin123' });
+
+  assert.equal(session.role, 'admin');
+  assert.ok(session.token);
+});
+
+test('student records can be updated and paginated', () => {
+  const db = createDatabase();
+  const app = createApp({ db });
+  app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  app.createStudent({ name: 'Bob', phone: '13800000002', className: '前端1班' });
+  const charlie = app.createStudent({ name: 'Charlie', phone: '13800000003', className: 'Java1班' });
+
+  const updated = app.updateStudent(charlie.id, { phone: '13900000003', remark: '已更新' });
+  const page1 = app.listStudents({ page: 1, pageSize: 2 });
+  const page2 = app.listStudents({ page: 2, pageSize: 2 });
+
+  assert.equal(updated.phone, '13900000003');
+  assert.equal(updated.remark, '已更新');
+  assert.equal(page1.items.length, 2);
+  assert.equal(page1.total, 3);
+  assert.equal(page2.items.length, 1);
+  assert.equal(page2.items[0].name, 'Charlie');
+});
+
+test('homework and interview records can be updated', () => {
+  const db = createDatabase();
+  const app = createApp({ db });
+  const student = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const homework = app.addHomeworkRecord({ studentId: student.id, homeworkName: 'HTML作业', className: '前端1班', submitStatus: 'pending' });
+  const interview = app.addInterviewRecord({ studentId: student.id, companyName: 'A公司', positionName: '前端工程师', result: 'pending', hiredStatus: 'pending' });
+
+  const updatedHomework = app.updateHomeworkRecord(homework.id, { submitStatus: 'submitted', reviewResult: 'passed' });
+  const updatedInterview = app.updateInterviewRecord(interview.id, { result: 'passed', hiredStatus: 'hired' });
+
+  assert.equal(updatedHomework.submitStatus, 'submitted');
+  assert.equal(updatedHomework.reviewResult, 'passed');
+  assert.equal(updatedInterview.result, 'passed');
+  assert.equal(updatedInterview.hiredStatus, 'hired');
+});
+
+test('schedule conflicts block overlapping teacher and student bookings', () => {
+  const { app, student1, student2 } = createSampleScheduleApp();
+
+  const first = app.createInterviewSchedule({
+    studentId: student1.id,
+    teacherId: 1,
+    teacherName: '张老师',
+    companyName: 'A公司',
+    positionName: '前端工程师',
+    startsAt: '2026-05-18T09:00:00',
+    endsAt: '2026-05-18T09:30:00',
+    status: 'scheduled',
+    remark: ''
+  });
+
+  assert.equal(first.teacherName, '张老师');
+  assert.throws(() => {
+    app.createInterviewSchedule({
+      studentId: student2.id,
+      teacherId: 1,
+      teacherName: '张老师',
+      companyName: 'B公司',
+      positionName: '测试工程师',
+      startsAt: '2026-05-18T09:15:00',
+      endsAt: '2026-05-18T09:45:00',
+      status: 'scheduled',
+      remark: ''
+    });
+  }, /teacher conflict/);
+
+  assert.throws(() => {
+    app.createInterviewSchedule({
+      studentId: student1.id,
+      teacherId: 2,
+      teacherName: '李老师',
+      companyName: 'C公司',
+      positionName: 'Java工程师',
+      startsAt: '2026-05-18T09:10:00',
+      endsAt: '2026-05-18T09:40:00',
+      status: 'scheduled',
+      remark: ''
+    });
+  }, /student conflict/);
+});
+
+test('schedule page shows weekly timeline and cards', () => {
+  const { app, student1 } = createSampleScheduleApp();
+  app.createInterviewSchedule({
+    studentId: student1.id,
+    teacherId: 1,
+    teacherName: '张老师',
+    companyName: 'A公司',
+    positionName: '前端工程师',
+    startsAt: '2026-05-18T09:00:00',
+    endsAt: '2026-05-18T09:30:00',
+    status: 'scheduled',
+    remark: '第一次面试'
+  });
+
+  const html = createServerApp({ app }).renderSchedulePage({ weekStart: '2026-05-18' });
+
+  assert.match(html, /面试排期/);
+  assert.match(html, /张老师/);
+  assert.match(html, /A公司/);
+  assert.match(html, /前端工程师/);
+});
+
+test('schedule creation requires student, teacher, and time fields', () => {
+  const { app } = createSampleScheduleApp();
+
+  assert.throws(() => {
+    app.createInterviewSchedule({
+      studentId: 1,
+      teacherName: '张老师',
+      companyName: 'A公司',
+      positionName: '前端工程师',
+      startsAt: '2026-05-18T09:00:00',
+      endsAt: '2026-05-18T09:30:00'
+    });
+  }, /required/);
+});
+
+test('cancelled schedules do not block the same time slot', () => {
+  const { app, student1, student2 } = createSampleScheduleApp();
+  const first = app.createInterviewSchedule({
+    studentId: student1.id,
+    teacherId: 1,
+    teacherName: '张老师',
+    companyName: 'A公司',
+    positionName: '前端工程师',
+    startsAt: '2026-05-18T09:00:00',
+    endsAt: '2026-05-18T09:30:00',
+    status: 'scheduled',
+    remark: ''
+  });
+
+  app.cancelInterviewSchedule(first.id);
+  const second = app.createInterviewSchedule({
+    studentId: student2.id,
+    teacherId: 1,
+    teacherName: '张老师',
+    companyName: 'B公司',
+    positionName: '测试工程师',
+    startsAt: '2026-05-18T09:15:00',
+    endsAt: '2026-05-18T09:45:00',
+    status: 'scheduled',
+    remark: ''
+  });
+
+  assert.equal(second.teacherId, 1);
+});
+
+
