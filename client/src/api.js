@@ -1,0 +1,77 @@
+const DEFAULT_ERROR_TEXT = '请求失败，请稍后重试';
+
+const ERROR_TEXT_MAP = {
+  unauthorized: '登录状态已失效，请重新登录',
+  'invalid credentials': '账号或密码不正确',
+  'not found': '请求的资源不存在',
+  'name and phone are required': '请填写学生姓名和手机号',
+  'student not found': '未找到对应学生',
+  'homework record not found': '未找到对应作业记录',
+  'interview record not found': '未找到对应面试记录',
+  'schedule not found': '未找到对应面试安排',
+  'schedule fields are required': '请完整填写面试安排信息',
+  'invalid schedule time': '面试开始时间必须早于结束时间',
+  'teacher conflict': '该老师在这个时间段已有安排',
+  'student conflict': '该学生在这个时间段已有安排'
+};
+
+async function request(method, path, body) {
+  const options = {
+    method,
+    credentials: 'include',
+    headers: {}
+  };
+
+  if (body !== undefined) {
+    options.headers['content-type'] = 'application/json';
+    options.body = JSON.stringify(body);
+  }
+
+  let response;
+  try {
+    response = await fetch(path, options);
+  } catch {
+    throw new Error('网络连接失败，请确认服务已启动');
+  }
+
+  const payload = await parsePayload(response);
+  if (!response.ok) {
+    throw new Error(toDisplayError(payload?.error || response.statusText));
+  }
+
+  return payload;
+}
+
+async function parsePayload(response) {
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) return null;
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+export function toDisplayError(error) {
+  if (!error) return DEFAULT_ERROR_TEXT;
+  const text = String(error).trim();
+  return ERROR_TEXT_MAP[text] || text || DEFAULT_ERROR_TEXT;
+}
+
+export function apiGet(path) {
+  return request('GET', path);
+}
+
+export function apiPost(path, body) {
+  return request('POST', path, body);
+}
+
+export function apiPatch(path, body) {
+  return request('PATCH', path, body);
+}
+
+export const api = {
+  get: apiGet,
+  post: apiPost,
+  patch: apiPatch
+};

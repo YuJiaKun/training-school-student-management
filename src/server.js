@@ -1,233 +1,213 @@
+const fs = require('node:fs');
 const http = require('node:http');
+const path = require('node:path');
+const { createDatabase } = require('./db');
+const { createApp } = require('./app');
 
-function createServerApp({ app }) {
+const DEFAULT_CLIENT_DIST = path.join(__dirname, '..', 'client', 'dist');
+const MIME_TYPES = {
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp'
+};
+
+function createServerApp({ app, clientDistPath = DEFAULT_CLIENT_DIST }) {
   return {
-    renderHomePage() {
-      const stats = app.getDashboardStats();
-      const students = app.listStudents().items;
-      const rows = students.map((student) => `<tr><td>${escapeHtml(student.name)}</td><td>${escapeHtml(student.phone)}</td><td>${escapeHtml(student.className)}</td><td>${escapeHtml(student.status)}</td></tr>`).join('');
-
-      return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <title>学生信息管理系统</title>
-  <style>
-    body { font-family: sans-serif; margin: 24px; }
-    .stats { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 12px; margin-bottom: 24px; }
-    .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-  </style>
-</head>
-<body>
-  <h1>学生信息管理系统</h1>
-  <p>学生总数：${stats.students.total}</p>
-  <section class="stats">
-    <div class="card"><strong>学生总数</strong><div>${stats.students.total}</div></div>
-    <div class="card"><strong>作业完成数</strong><div>${stats.homework.completed}</div></div>
-    <div class="card"><strong>面试次数</strong><div>${stats.interviews.total}</div></div>
-    <div class="card"><strong>就业率</strong><div>${stats.employmentRate}%</div></div>
-  </section>
-  <h2>新增学生</h2>
-  <table>
-    <thead><tr><th>姓名</th><th>手机号</th><th>班级</th><th>状态</th></tr></thead>
-    <tbody>${rows}</tbody>
-  </table>
-</body>
-</html>`;
-    },
-
-    renderHomeworkPage() {
-      const records = app.listHomeworkRecords().items;
-      const rows = records.map((record) => `<tr><td>${escapeHtml(record.homeworkName)}</td><td>${escapeHtml(String(record.studentId))}</td><td>${escapeHtml(record.className)}</td><td>${escapeHtml(record.submitStatus)}</td></tr>`).join('');
-      return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>作业管理</title></head><body><h1>作业管理</h1><table><tbody>${rows}</tbody></table></body></html>`;
-    },
-
-    renderInterviewPage() {
-      const records = app.listInterviewRecords().items;
-      const rows = records.map((record) => `<tr><td>${escapeHtml(record.companyName)}</td><td>${escapeHtml(record.positionName)}</td><td>${escapeHtml(record.result)}</td></tr>`).join('');
-      return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>面试记录</title></head><body><h1>面试记录</h1><table><tbody>${rows}</tbody></table></body></html>`;
-    },
-
-    renderSchedulePage(filters = {}) {
-      const timeline = app.listInterviewScheduleTimeline({ weekStart: filters.weekStart || currentWeekStart() });
-      const header = timeline.weeks.map((day) => `<th>${escapeHtml(day)}</th>`).join('');
-      const rows = timeline.teachers.map((teacher) => {
-        const cells = timeline.weeks.map((day) => {
-          const entries = teacher.entries.filter((entry) => entry.startsAt.startsWith(day));
-          return `<td>${entries.map((entry) => `<div class="schedule-card"><strong>${escapeHtml(entry.startsAt.slice(11, 16))}</strong><div>${escapeHtml(entry.studentName)}</div><div>${escapeHtml(entry.companyName)}</div><div>${escapeHtml(entry.positionName)}</div><div>${escapeHtml(entry.status)}</div></div>`).join('')}</td>`;
-        }).join('');
-        return `<tr><th>${escapeHtml(teacher.teacherName)}</th>${cells}</tr>`;
-      }).join('');
-      return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>面试排期</title><style>body{font-family:sans-serif;margin:24px}.schedule{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;vertical-align:top;padding:8px}.schedule-card{border:1px solid #ddd;border-radius:6px;padding:8px;margin-bottom:8px}</style></head><body><h1>面试排期</h1><p>${timeline.weeks[0]} ~ ${timeline.weeks[6]}</p><table class="schedule"><thead><tr><th>老师</th>${header}</tr></thead><tbody>${rows}</tbody></table></body></html>`;
+    renderClientShell() {
+      return readClientIndex(clientDistPath) || renderFallbackShell();
     },
 
     listen(port = 0) {
       const server = http.createServer(async (req, res) => {
         const url = new URL(req.url, 'http://127.0.0.1');
-        if (req.method === 'GET' && url.pathname === '/') {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(this.renderHomePage());
-          return;
-        }
+        const session = getSessionFromRequest(req, app);
 
-        if (req.method === 'GET' && url.pathname === '/homework') {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(this.renderHomeworkPage());
-          return;
-        }
-
-        if (req.method === 'GET' && url.pathname === '/interviews') {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(this.renderInterviewPage());
-          return;
-        }
-
-        if (req.method === 'GET' && url.pathname === '/schedules') {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(this.renderSchedulePage({ weekStart: url.searchParams.get('weekStart') || undefined }));
-          return;
-        }
-
-        if (req.method === 'GET' && url.pathname === '/api/students') {
-          const status = url.searchParams.get('status') || undefined;
-          const keyword = url.searchParams.get('keyword') || undefined;
-          const className = url.searchParams.get('className') || undefined;
-          const data = app.listStudents({ status, keyword, className });
-          sendJson(res, 200, data);
-          return;
-        }
-
-        if (req.method === 'GET' && url.pathname === '/api/homework') {
-          const studentId = url.searchParams.get('studentId') || undefined;
-          const className = url.searchParams.get('className') || undefined;
-          const submitStatus = url.searchParams.get('submitStatus') || undefined;
-          sendJson(res, 200, app.listHomeworkRecords({ studentId, className, submitStatus }));
-          return;
-        }
-
-        if (req.method === 'GET' && url.pathname === '/api/interviews') {
-          const studentId = url.searchParams.get('studentId') || undefined;
-          const companyName = url.searchParams.get('companyName') || undefined;
-          const result = url.searchParams.get('result') || undefined;
-          sendJson(res, 200, app.listInterviewRecords({ studentId, companyName, result }));
-          return;
-        }
-
-        if (req.method === 'GET' && url.pathname === '/api/schedules') {
-          const teacherId = url.searchParams.get('teacherId') || undefined;
-          const studentId = url.searchParams.get('studentId') || undefined;
-          const status = url.searchParams.get('status') || undefined;
-          const from = url.searchParams.get('from') || undefined;
-          const to = url.searchParams.get('to') || undefined;
-          sendJson(res, 200, app.listInterviewSchedules({ teacherId, studentId, status, from, to }));
-          return;
-        }
-
-        if (req.method === 'POST' && url.pathname === '/api/students') {
-          const body = await readJson(req);
-          const student = app.createStudent(body);
-          sendJson(res, 201, { student });
-          return;
-        }
-
-        if (req.method === 'POST' && url.pathname === '/api/homework') {
-          const body = await readJson(req);
-          const record = app.addHomeworkRecord(body);
-          sendJson(res, 201, { record });
-          return;
-        }
-
-        if (req.method === 'POST' && url.pathname === '/api/interviews') {
-          const body = await readJson(req);
-          const record = app.addInterviewRecord(body);
-          sendJson(res, 201, { record });
-          return;
-        }
-
-        if (req.method === 'POST' && url.pathname === '/api/schedules') {
-          try {
-            const body = await readJson(req);
-            const schedule = app.createInterviewSchedule(body);
-            sendJson(res, 201, { schedule });
-          } catch (error) {
-            sendJson(res, 400, { error: error.message });
+        try {
+          if (req.method === 'GET' && url.pathname === '/health') {
+            sendJson(res, 200, { status: 'ok' });
+            return;
           }
-          return;
-        }
 
-        const scheduleMatch = url.pathname.match(/^\/api\/schedules\/(\d+)$/);
-        if (scheduleMatch && req.method === 'PATCH') {
-          try {
-            const body = await readJson(req);
-            const schedule = app.updateInterviewSchedule(Number(scheduleMatch[1]), body);
-            sendJson(res, 200, { schedule });
-          } catch (error) {
-            sendJson(res, 400, { error: error.message });
+          if (req.method === 'POST' && url.pathname === '/api/login') {
+            await handleApiLogin(req, res, app);
+            return;
           }
-          return;
-        }
 
-        const scheduleCancelMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/cancel$/);
-        if (scheduleCancelMatch && req.method === 'POST') {
-          try {
-            const schedule = app.cancelInterviewSchedule(Number(scheduleCancelMatch[1]));
-            sendJson(res, 200, { schedule });
-          } catch (error) {
-            sendJson(res, 400, { error: error.message });
+          if (req.method === 'POST' && url.pathname === '/login') {
+            await handleLegacyLogin(req, res, app);
+            return;
           }
-          return;
-        }
 
-        const scheduleCompleteMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/complete$/);
-        if (scheduleCompleteMatch && req.method === 'POST') {
-          try {
-            const schedule = app.completeInterviewSchedule(Number(scheduleCompleteMatch[1]));
-            sendJson(res, 200, { schedule });
-          } catch (error) {
-            sendJson(res, 400, { error: error.message });
+          if (req.method === 'POST' && url.pathname === '/api/logout') {
+            res.writeHead(200, {
+              'content-type': 'application/json; charset=utf-8',
+              'set-cookie': clearSessionCookie()
+            });
+            res.end(JSON.stringify({ ok: true }));
+            return;
           }
-          return;
+
+          if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/logout') {
+            res.writeHead(302, {
+              location: '/',
+              'set-cookie': clearSessionCookie()
+            });
+            res.end();
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/me') {
+            if (!session) {
+              sendJson(res, 401, { error: 'unauthorized' });
+              return;
+            }
+            sendJson(res, 200, { user: sessionToUser(session) });
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/dashboard/stats') {
+            sendJson(res, 200, app.getDashboardStats());
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/students') {
+            sendJson(res, 200, app.listStudents(readStudentFilters(url)));
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/students') {
+            await mutateJson(req, res, 201, (body) => ({ student: app.createStudent(body) }), app);
+            return;
+          }
+
+          const studentMatch = url.pathname.match(/^\/api\/students\/(\d+)$/);
+          if (studentMatch && req.method === 'PATCH') {
+            await mutateJson(req, res, 200, (body) => ({ student: app.updateStudent(Number(studentMatch[1]), body) }), app);
+            return;
+          }
+
+          const archiveMatch = url.pathname.match(/^\/api\/students\/(\d+)\/archive$/);
+          if (archiveMatch && req.method === 'POST') {
+            mutate(res, 200, () => ({ student: app.archiveStudent(Number(archiveMatch[1])) }), app);
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/homework') {
+            sendJson(res, 200, app.listHomeworkRecords(readHomeworkFilters(url)));
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/homework') {
+            await mutateJson(req, res, 201, (body) => ({ record: app.addHomeworkRecord(body) }), app);
+            return;
+          }
+
+          const homeworkMatch = url.pathname.match(/^\/api\/homework\/(\d+)$/);
+          if (homeworkMatch && req.method === 'PATCH') {
+            await mutateJson(req, res, 200, (body) => ({ record: app.updateHomeworkRecord(Number(homeworkMatch[1]), body) }), app);
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/interviews') {
+            sendJson(res, 200, app.listInterviewRecords(readInterviewFilters(url)));
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/interviews') {
+            await mutateJson(req, res, 201, (body) => ({ record: app.addInterviewRecord(body) }), app);
+            return;
+          }
+
+          const interviewMatch = url.pathname.match(/^\/api\/interviews\/(\d+)$/);
+          if (interviewMatch && req.method === 'PATCH') {
+            await mutateJson(req, res, 200, (body) => ({ record: app.updateInterviewRecord(Number(interviewMatch[1]), body) }), app);
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/schedules/timeline') {
+            sendJson(res, 200, app.listInterviewScheduleTimeline({ weekStart: url.searchParams.get('weekStart') || currentWeekStart() }));
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/schedules') {
+            sendJson(res, 200, app.listInterviewSchedules(readScheduleFilters(url)));
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/schedules') {
+            await mutateJson(req, res, 201, (body) => ({ schedule: app.requestInterviewSchedule(body) }), app);
+            return;
+          }
+
+          const scheduleApproveMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/approve$/);
+          if (scheduleApproveMatch && req.method === 'POST') {
+            await mutateJson(req, res, 200, (body) => ({ schedule: app.approveInterviewSchedule(Number(scheduleApproveMatch[1]), body) }), app);
+            return;
+          }
+
+          const scheduleAcceptMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/accept$/);
+          if (scheduleAcceptMatch && req.method === 'POST') {
+            await mutateJson(req, res, 200, (body) => ({ schedule: app.acceptInterviewSchedule(Number(scheduleAcceptMatch[1]), body) }), app);
+            return;
+          }
+
+          const scheduleRejectMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/reject$/);
+          if (scheduleRejectMatch && req.method === 'POST') {
+            mutate(res, 200, () => ({ schedule: app.rejectInterviewSchedule(Number(scheduleRejectMatch[1])) }), app);
+            return;
+          }
+
+          const scheduleCancelMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/cancel$/);
+          if (scheduleCancelMatch && req.method === 'POST') {
+            mutate(res, 200, () => ({ schedule: app.cancelInterviewSchedule(Number(scheduleCancelMatch[1])) }), app);
+            return;
+          }
+
+          const scheduleCompleteMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/complete$/);
+          if (scheduleCompleteMatch && req.method === 'POST') {
+            mutate(res, 200, () => ({ schedule: app.completeInterviewSchedule(Number(scheduleCompleteMatch[1])) }), app);
+            return;
+          }
+
+          const scheduleMatch = url.pathname.match(/^\/api\/schedules\/(\d+)$/);
+          if (scheduleMatch && req.method === 'PATCH') {
+            await mutateJson(req, res, 200, (body) => ({ schedule: app.updateInterviewSchedule(Number(scheduleMatch[1]), body) }), app);
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/export/students') {
+            sendText(res, 200, app.exportStudents(readStudentFilters(url)), 'text/csv; charset=utf-8');
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/export/homework') {
+            sendText(res, 200, app.exportHomeworkRecords(readHomeworkFilters(url)), 'text/csv; charset=utf-8');
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/export/interviews') {
+            sendText(res, 200, app.exportInterviewRecords(readInterviewFilters(url)), 'text/csv; charset=utf-8');
+            return;
+          }
+
+          if (url.pathname.startsWith('/api/')) {
+            sendJson(res, 404, { error: 'not found' });
+            return;
+          }
+
+          if (req.method === 'GET') {
+            serveClientAssetOrShell(res, clientDistPath, url.pathname);
+            return;
+          }
+
+          sendJson(res, 404, { error: 'not found' });
+        } catch (error) {
+          sendJson(res, 500, { error: error.message });
         }
-
-
-        const archiveMatch = url.pathname.match(/^\/api\/students\/(\d+)\/archive$/);
-        if (req.method === 'POST' && archiveMatch) {
-          const student = app.archiveStudent(Number(archiveMatch[1]));
-          sendJson(res, 200, { student });
-          return;
-        }
-
-        const studentsExport = url.pathname === '/api/export/students';
-        if (req.method === 'GET' && studentsExport) {
-          const status = url.searchParams.get('status') || undefined;
-          const keyword = url.searchParams.get('keyword') || undefined;
-          const className = url.searchParams.get('className') || undefined;
-          sendText(res, 200, app.exportStudents({ status, keyword, className }), 'text/csv; charset=utf-8');
-          return;
-        }
-
-        const homeworkExport = url.pathname === '/api/export/homework';
-        if (req.method === 'GET' && homeworkExport) {
-          const studentId = url.searchParams.get('studentId') || undefined;
-          const className = url.searchParams.get('className') || undefined;
-          const submitStatus = url.searchParams.get('submitStatus') || undefined;
-          sendText(res, 200, app.exportHomeworkRecords({ studentId, className, submitStatus }), 'text/csv; charset=utf-8');
-          return;
-        }
-
-        const interviewExport = url.pathname === '/api/export/interviews';
-        if (req.method === 'GET' && interviewExport) {
-          const studentId = url.searchParams.get('studentId') || undefined;
-          const companyName = url.searchParams.get('companyName') || undefined;
-          const result = url.searchParams.get('result') || undefined;
-          sendText(res, 200, app.exportInterviewRecords({ studentId, companyName, result }), 'text/csv; charset=utf-8');
-          return;
-        }
-
-        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'not found' }));
       });
 
       return server.listen(port);
@@ -235,16 +215,203 @@ function createServerApp({ app }) {
   };
 }
 
-async function readJson(req) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const text = Buffer.concat(chunks).toString('utf8') || '{}';
-  return JSON.parse(text);
+async function handleApiLogin(req, res, app) {
+  try {
+    const body = await readBody(req);
+    const login = app.login({ username: body.username, password: body.password });
+    const session = app.getSession(login.token);
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'set-cookie': sessionCookie(login.token)
+    });
+    res.end(JSON.stringify({ user: sessionToUser(session) }));
+  } catch (error) {
+    sendJson(res, 401, { error: error.message });
+  }
+}
+
+async function handleLegacyLogin(req, res, app) {
+  try {
+    const body = await readBody(req);
+    const login = app.login({ username: body.username, password: body.password });
+    res.writeHead(302, {
+      location: '/dashboard',
+      'set-cookie': sessionCookie(login.token)
+    });
+    res.end();
+  } catch (error) {
+    sendJson(res, 401, { error: error.message });
+  }
+}
+
+async function mutateJson(req, res, statusCode, handler, app) {
+  try {
+    const body = await readBody(req);
+    const payload = handler(body);
+    persist(app);
+    sendJson(res, statusCode, payload);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message });
+  }
+}
+
+function mutate(res, statusCode, handler, app) {
+  try {
+    const payload = handler();
+    persist(app);
+    sendJson(res, statusCode, payload);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message });
+  }
+}
+
+function persist(app) {
+  if (typeof app.saveDatabase === 'function') app.saveDatabase();
+}
+
+function readStudentFilters(url) {
+  return {
+    status: url.searchParams.get('status') || undefined,
+    keyword: url.searchParams.get('keyword') || undefined,
+    className: url.searchParams.get('className') || undefined,
+    page: url.searchParams.get('page') || undefined,
+    pageSize: url.searchParams.get('pageSize') || undefined
+  };
+}
+
+function readHomeworkFilters(url) {
+  return {
+    studentId: url.searchParams.get('studentId') || undefined,
+    className: url.searchParams.get('className') || undefined,
+    submitStatus: url.searchParams.get('submitStatus') || undefined
+  };
+}
+
+function readInterviewFilters(url) {
+  return {
+    studentId: url.searchParams.get('studentId') || undefined,
+    companyName: url.searchParams.get('companyName') || undefined,
+    result: url.searchParams.get('result') || undefined
+  };
+}
+
+function readScheduleFilters(url) {
+  return {
+    teacherId: url.searchParams.get('teacherId') || undefined,
+    studentId: url.searchParams.get('studentId') || undefined,
+    status: url.searchParams.get('status') || undefined,
+    from: url.searchParams.get('from') || undefined,
+    to: url.searchParams.get('to') || undefined
+  };
+}
+
+function serveClientAssetOrShell(res, clientDistPath, requestPath) {
+  const index = readClientIndex(clientDistPath);
+  if (!index) {
+    sendText(res, 200, renderFallbackShell(), 'text/html; charset=utf-8');
+    return;
+  }
+
+  const filePath = resolveClientPath(clientDistPath, requestPath);
+  if (filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+    sendFile(res, filePath);
+    return;
+  }
+
+  sendText(res, 200, index, 'text/html; charset=utf-8');
+}
+
+function readClientIndex(clientDistPath) {
+  const indexPath = path.join(clientDistPath, 'index.html');
+  if (!fs.existsSync(indexPath)) return null;
+  return fs.readFileSync(indexPath, 'utf8');
+}
+
+function resolveClientPath(clientDistPath, requestPath) {
+  let decodedPath;
+  try {
+    decodedPath = decodeURIComponent(requestPath);
+  } catch {
+    return null;
+  }
+  const relativePath = decodedPath.replace(/^\/+/, '') || 'index.html';
+  const resolved = path.resolve(clientDistPath, relativePath);
+  const root = path.resolve(clientDistPath);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) return null;
+  return resolved;
+}
+
+function sendFile(res, filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  const contentType = MIME_TYPES[extension] || 'application/octet-stream';
+  sendText(res, 200, fs.readFileSync(filePath), contentType);
+}
+
+function renderFallbackShell() {
+  return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>培训机构学生管理系统</title></head><body><div id="root">前端资源尚未构建，请先运行 npm run build。</div></body></html>';
+}
+
+function getSessionFromRequest(req, app) {
+  const cookie = parseCookies(req.headers.cookie || '');
+  if (!cookie.session) return null;
+  return app.getSession(cookie.session);
+}
+
+function parseCookies(header) {
+  const result = {};
+  for (const part of header.split(';')) {
+    const [rawKey, ...rawValue] = part.trim().split('=');
+    if (!rawKey) continue;
+    result[rawKey] = decodeURIComponent(rawValue.join('='));
+  }
+  return result;
+}
+
+function sessionToUser(session) {
+  return {
+    username: session.username,
+    role: session.role,
+    teacherId: session.teacherId || null
+  };
+}
+
+function sessionCookie(token) {
+  return `session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax`;
+}
+
+function clearSessionCookie() {
+  return 'session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax';
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => {
+      body += chunk;
+    });
+    req.on('end', () => {
+      try {
+        const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+        if (!body) {
+          resolve({});
+          return;
+        }
+        if (contentType === 'application/x-www-form-urlencoded') {
+          resolve(Object.fromEntries(new URLSearchParams(body)));
+          return;
+        }
+        resolve(JSON.parse(body));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    req.on('error', reject);
+  });
 }
 
 function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify(payload));
+  sendText(res, statusCode, JSON.stringify(payload), 'application/json; charset=utf-8');
 }
 
 function sendText(res, statusCode, payload, contentType) {
@@ -260,13 +427,28 @@ function currentWeekStart() {
   return monday.toISOString().slice(0, 10);
 }
 
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
+if (require.main === module) {
+  const port = Number(process.env.PORT || 3000);
+  const filePath = process.env.DATA_FILE || './data/data.json';
+  const db = createDatabase({ filePath });
+  const app = createApp({ db });
+  const server = createServerApp({ app }).listen(port);
+
+  server.on('listening', () => {
+    const address = server.address();
+    const actualPort = typeof address === 'object' && address ? address.port : port;
+    console.log(`学生管理系统已启动：http://127.0.0.1:${actualPort}`);
+    console.log(`数据文件：${filePath}`);
+  });
+
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`端口 ${port} 已被占用，请设置 PORT 使用其他端口，例如：PORT=3001 npm start`);
+    } else {
+      console.error(`启动失败：${error.message}`);
+    }
+    process.exit(1);
+  });
 }
 
 module.exports = { createServerApp };

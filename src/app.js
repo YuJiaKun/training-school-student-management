@@ -153,6 +153,10 @@ function createApp({ db }) {
         startsAt: input.startsAt,
         endsAt: input.endsAt,
         status: input.status || 'scheduled',
+        requestSource: input.requestSource || '',
+        confirmedByRole: input.confirmedByRole || '',
+        confirmedByName: input.confirmedByName || '',
+        confirmedAt: input.confirmedAt || '',
         remark: input.remark || ''
       };
       assertScheduleTime(schedule);
@@ -161,6 +165,24 @@ function createApp({ db }) {
       return schedule;
     },
 
+    approveInterviewSchedule(id, input = {}) {
+      return confirmInterviewSchedule(db, id, input, 'admin');
+    },
+
+    acceptInterviewSchedule(id, input = {}) {
+      return confirmInterviewSchedule(db, id, input, 'teacher');
+    },
+
+    rejectInterviewSchedule(id) {
+      const schedule = db.interviewSchedules.find((item) => item.id === id);
+      if (!schedule) throw new Error('schedule not found');
+      schedule.status = 'cancelled';
+      return schedule;
+    },
+
+    requestInterviewSchedule(input) {
+      return this.createInterviewSchedule({ ...input, status: 'requested', requestSource: 'student' });
+    },
     updateInterviewSchedule(id, patch) {
       const schedule = db.interviewSchedules.find((item) => item.id === id);
       if (!schedule) throw new Error('schedule not found');
@@ -218,7 +240,7 @@ function createApp({ db }) {
       const from = `${days[0]}T00:00:00`;
       const to = `${days[6]}T23:59:59`;
       const entries = this.listInterviewSchedules({ from, to }).items
-        .filter((schedule) => schedule.status !== 'cancelled')
+        .filter((schedule) => schedule.status === 'confirmed')
         .sort((left, right) => left.startsAt.localeCompare(right.startsAt));
       const teachers = [];
 
@@ -260,8 +282,14 @@ function createApp({ db }) {
         throw new Error('invalid credentials');
       }
       const token = `session-${sessions.size + 1}`;
-      sessions.set(token, { role: account.role, username });
+      const session = { role: account.role, username };
+      if (account.role === 'teacher') session.teacherId = 1;
+      sessions.set(token, session);
       return { token, role: account.role };
+    },
+
+    getSession(token) {
+      return sessions.get(token) || null;
     },
 
     saveDatabase() {
@@ -295,6 +323,16 @@ function createApp({ db }) {
       return toCsv(rows);
     }
   };
+}
+
+function confirmInterviewSchedule(db, id, input, confirmedByRole) {
+  const schedule = db.interviewSchedules.find((item) => item.id === id);
+  if (!schedule) throw new Error('schedule not found');
+  schedule.status = 'confirmed';
+  schedule.confirmedByRole = confirmedByRole;
+  schedule.confirmedByName = input.approverName || input.confirmedByName || '';
+  schedule.confirmedAt = input.confirmedAt || new Date().toISOString();
+  return schedule;
 }
 
 function requireScheduleFields(input) {

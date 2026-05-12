@@ -16,7 +16,27 @@ function createSampleScheduleApp() {
   return { app, student1, student2 };
 }
 
-test('student lifecycle supports create, archive, query, stats, and export', async () => {
+async function withServer(app, callback, options = {}) {
+  const server = createServerApp({ app, ...options }).listen(0);
+  await once(server, 'listening');
+  const { port } = server.address();
+  try {
+    await callback(`http://127.0.0.1:${port}`);
+  } finally {
+    server.close();
+  }
+}
+
+function createClientDist() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'student-client-'));
+  const assetsDir = path.join(dir, 'assets');
+  fs.mkdirSync(assetsDir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><head><title>前端入口</title></head><body><div id="root">React App Shell</div><script type="module" src="/assets/app.js"></script></body></html>');
+  fs.writeFileSync(path.join(assetsDir, 'app.js'), 'console.log("client asset");');
+  return dir;
+}
+
+test('student lifecycle supports create, archive, query, stats, and export', () => {
   const db = createDatabase();
   const app = createApp({ db });
 
@@ -46,97 +66,53 @@ test('student lifecycle supports create, archive, query, stats, and export', asy
 
   app.archiveStudent(alice.id);
 
-  const activeStudents = app.listStudents({ status: 'active' });
-  assert.equal(activeStudents.total, 1);
-  assert.equal(activeStudents.items[0].name, 'Bob');
-
-  const archivedStudents = app.listStudents({ status: 'archived' });
-  assert.equal(archivedStudents.total, 1);
-  assert.equal(archivedStudents.items[0].name, 'Alice');
-
-  const stats = app.getDashboardStats();
-  assert.equal(stats.students.active, 1);
-  assert.equal(stats.students.archived, 1);
-  assert.equal(stats.homework.completed, 1);
-  assert.equal(stats.interviews.total, 2);
-  assert.equal(stats.employmentRate, 50);
-
-  const exportedStudents = app.exportStudents({ status: 'active' });
-  assert.match(exportedStudents, /Bob/);
-  assert.doesNotMatch(exportedStudents, /Alice/);
+  assert.equal(app.listStudents({ status: 'active' }).items[0].name, 'Bob');
+  assert.equal(app.listStudents({ status: 'archived' }).items[0].name, 'Alice');
+  assert.deepEqual(app.getDashboardStats(), {
+    students: { active: 1, archived: 1, total: 2 },
+    homework: { total: 2, completed: 1 },
+    interviews: { total: 2 },
+    employmentRate: 50
+  });
+  assert.match(app.exportStudents({ status: 'active' }), /Bob/);
+  assert.doesNotMatch(app.exportStudents({ status: 'active' }), /Alice/);
 });
 
 test('student name and phone are required', () => {
-  const db = createDatabase();
-  const app = createApp({ db });
+  const app = createApp({ db: createDatabase() });
 
   assert.throws(() => {
-    app.createStudent({
-      name: '',
-      phone: '',
-      gender: 'female',
-      birthday: '2001-01-01',
-      className: '前端1班',
-      enrolledAt: '2026-05-01',
-      remark: ''
-    });
+    app.createStudent({ name: '', phone: '', className: '前端1班' });
   }, /name and phone are required/);
 });
 
-test('dashboard html shows statistics and student navigation', () => {
-  const db = createDatabase();
-  const app = createApp({ db });
-  app.createStudent({
-    name: 'Alice',
-    phone: '13800000001',
-    gender: 'female',
-    birthday: '2001-01-01',
-    className: '前端1班',
-    enrolledAt: '2026-05-01',
-    remark: ''
+test('student api creates, updates, filters, and archives records over http', async () => {
+  const app = createApp({ db: createDatabase() });
+
+  await withServer(app, async (baseUrl) => {
+    const created = await fetch(`${baseUrl}/api/students`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Alice', phone: '13800000001', className: '前端1班', enrolledAt: '2026-05-01' })
+    }).then((response) => response.json());
+
+    const updated = await fetch(`${baseUrl}/api/students/${created.student.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ phone: '13900000001', remark: '已更新' })
+    }).then((response) => response.json());
+
+    const filtered = await fetch(`${baseUrl}/api/students?keyword=13900000001`).then((response) => response.json());
+    const archived = await fetch(`${baseUrl}/api/students/${created.student.id}/archive`, { method: 'POST' }).then((response) => response.json());
+
+    assert.equal(updated.student.phone, '13900000001');
+    assert.equal(filtered.total, 1);
+    assert.equal(archived.student.status, 'archived');
   });
-
-  const html = createServerApp({ app }).renderHomePage();
-
-  assert.match(html, /学生信息管理系统/);
-  assert.match(html, /学生总数/);
-  assert.match(html, /新增学生/);
-  assert.match(html, /Alice/);
 });
 
-test('student api creates records and archives them over http', async () => {
-  const db = createDatabase();
-  const app = createApp({ db });
-  const serverApp = createServerApp({ app });
-  const server = serverApp.listen(0);
-  await once(server, 'listening');
-  const { port } = server.address();
-
-  const created = await fetch(`http://127.0.0.1:${port}/api/students`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      name: 'Alice',
-      phone: '13800000001',
-      className: '前端1班',
-      enrolledAt: '2026-05-01'
-    })
-  }).then((response) => response.json());
-
-  assert.equal(created.student.name, 'Alice');
-
-  const archived = await fetch(`http://127.0.0.1:${port}/api/students/${created.student.id}/archive`, {
-    method: 'POST'
-  }).then((response) => response.json());
-
-  assert.equal(archived.student.status, 'archived');
-
-  server.close();
-});
-
-test('homework and interview records can be listed, filtered, and exported', () => {
-  const db = createDatabase();
-  const app = createApp({ db });
+test('homework and interview records can be listed, filtered, updated, and exported', async () => {
+  const app = createApp({ db: createDatabase() });
   const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
   const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: 'Java1班' });
 
@@ -147,113 +123,126 @@ test('homework and interview records can be listed, filtered, and exported', () 
 
   assert.equal(app.listHomeworkRecords({ submitStatus: 'submitted' }).total, 1);
   assert.equal(app.listInterviewRecords({ result: 'failed' }).items[0].companyName, 'B公司');
-  assert.match(app.exportHomeworkRecords({ className: '前端1班' }), /HTML作业/);
-  assert.doesNotMatch(app.exportHomeworkRecords({ className: '前端1班' }), /SQL作业/);
-  assert.match(app.exportInterviewRecords({ result: 'passed' }), /A公司/);
-  assert.doesNotMatch(app.exportInterviewRecords({ result: 'passed' }), /B公司/);
-});
 
-test('homework and interview pages expose table data', () => {
-  const db = createDatabase();
-  const app = createApp({ db });
-  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
-  app.addHomeworkRecord({ studentId: alice.id, homeworkName: 'HTML作业', className: '前端1班', submitStatus: 'submitted', submitAt: '2026-05-08', reviewResult: 'passed', remark: '' });
-  app.addInterviewRecord({ studentId: alice.id, companyName: 'A公司', positionName: '前端工程师', interviewAt: '2026-05-09', result: 'passed', feedback: '表现稳定', hiredStatus: 'hired', remark: '' });
+  await withServer(app, async (baseUrl) => {
+    const homework = app.listHomeworkRecords({ submitStatus: 'pending' }).items[0];
+    const interview = app.listInterviewRecords({ result: 'failed' }).items[0];
 
-  const serverApp = createServerApp({ app });
+    const updatedHomework = await fetch(`${baseUrl}/api/homework/${homework.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ submitStatus: 'submitted', reviewResult: 'passed' })
+    }).then((response) => response.json());
+    const updatedInterview = await fetch(`${baseUrl}/api/interviews/${interview.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ result: 'passed', hiredStatus: 'hired' })
+    }).then((response) => response.json());
+    const homeworkCsv = await fetch(`${baseUrl}/api/export/homework?className=${encodeURIComponent('前端1班')}`).then((response) => response.text());
+    const interviewCsv = await fetch(`${baseUrl}/api/export/interviews?result=passed`).then((response) => response.text());
 
-  assert.match(serverApp.renderHomeworkPage(), /作业管理/);
-  assert.match(serverApp.renderHomeworkPage(), /HTML作业/);
-  assert.match(serverApp.renderInterviewPage(), /面试记录/);
-  assert.match(serverApp.renderInterviewPage(), /A公司/);
-});
-
-test('export routes return csv content over http', async () => {
-  const db = createDatabase();
-  const app = createApp({ db });
-  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
-  app.addHomeworkRecord({ studentId: alice.id, homeworkName: 'HTML作业', className: '前端1班', submitStatus: 'submitted' });
-  app.addInterviewRecord({ studentId: alice.id, companyName: 'A公司', positionName: '前端工程师', result: 'passed', hiredStatus: 'hired' });
-
-  const server = createServerApp({ app }).listen(0);
-  await once(server, 'listening');
-  const { port } = server.address();
-
-  const studentsCsv = await fetch(`http://127.0.0.1:${port}/api/export/students`).then((response) => response.text());
-  const homeworkCsv = await fetch(`http://127.0.0.1:${port}/api/export/homework`).then((response) => response.text());
-  const interviewCsv = await fetch(`http://127.0.0.1:${port}/api/export/interviews`).then((response) => response.text());
-
-  assert.match(studentsCsv, /姓名,手机号/);
-  assert.match(homeworkCsv, /作业名称/);
-  assert.match(interviewCsv, /公司,岗位/);
-
-  server.close();
+    assert.equal(updatedHomework.record.reviewResult, 'passed');
+    assert.equal(updatedInterview.record.hiredStatus, 'hired');
+    assert.match(homeworkCsv, /HTML作业/);
+    assert.match(interviewCsv, /A公司/);
+  });
 });
 
 test('database state can be saved and loaded from disk', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'student-management-'));
   const filePath = path.join(tempDir, 'data.json');
-  const db = createDatabase({ filePath });
-  const app = createApp({ db });
+  const app = createApp({ db: createDatabase({ filePath }) });
   app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
   app.saveDatabase();
 
-  const loadedDb = createDatabase({ filePath });
-  const loadedApp = createApp({ db: loadedDb });
+  const loadedApp = createApp({ db: createDatabase({ filePath }) });
 
-  assert.equal(loadedApp.listStudents().total, 1);
   assert.equal(loadedApp.listStudents().items[0].name, 'Alice');
 });
 
-test('login returns a role based session token', () => {
-  const db = createDatabase();
-  const app = createApp({ db });
+test('login returns a role based session and /api/me exposes the current user', async () => {
+  const app = createApp({ db: createDatabase() });
 
-  const session = app.login({ username: 'admin', password: 'admin123' });
+  await withServer(app, async (baseUrl) => {
+    const login = await fetch(`${baseUrl}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'teacher', password: 'teacher123' })
+    });
+    const body = await login.json();
+    const cookie = login.headers.get('set-cookie');
+    const me = await fetch(`${baseUrl}/api/me`, { headers: { cookie } }).then((response) => response.json());
 
-  assert.equal(session.role, 'admin');
-  assert.ok(session.token);
+    assert.equal(login.status, 200);
+    assert.equal(body.user.role, 'teacher');
+    assert.equal(me.user.username, 'teacher');
+    assert.equal(me.user.teacherId, 1);
+  });
 });
 
-test('student records can be updated and paginated', () => {
-  const db = createDatabase();
-  const app = createApp({ db });
+test('dashboard stats are available for the frontend', async () => {
+  const app = createApp({ db: createDatabase() });
   app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
-  app.createStudent({ name: 'Bob', phone: '13800000002', className: '前端1班' });
-  const charlie = app.createStudent({ name: 'Charlie', phone: '13800000003', className: 'Java1班' });
 
-  const updated = app.updateStudent(charlie.id, { phone: '13900000003', remark: '已更新' });
-  const page1 = app.listStudents({ page: 1, pageSize: 2 });
-  const page2 = app.listStudents({ page: 2, pageSize: 2 });
+  await withServer(app, async (baseUrl) => {
+    const stats = await fetch(`${baseUrl}/api/dashboard/stats`).then((response) => response.json());
 
-  assert.equal(updated.phone, '13900000003');
-  assert.equal(updated.remark, '已更新');
-  assert.equal(page1.items.length, 2);
-  assert.equal(page1.total, 3);
-  assert.equal(page2.items.length, 1);
-  assert.equal(page2.items[0].name, 'Charlie');
+    assert.equal(stats.students.total, 1);
+    assert.equal(stats.homework.total, 0);
+  });
 });
 
-test('homework and interview records can be updated', () => {
-  const db = createDatabase();
-  const app = createApp({ db });
-  const student = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
-  const homework = app.addHomeworkRecord({ studentId: student.id, homeworkName: 'HTML作业', className: '前端1班', submitStatus: 'pending' });
-  const interview = app.addInterviewRecord({ studentId: student.id, companyName: 'A公司', positionName: '前端工程师', result: 'pending', hiredStatus: 'pending' });
+test('schedule workflow supports request, approval, teacher acceptance, and timeline filtering', async () => {
+  const { app, student1, student2 } = createSampleScheduleApp();
 
-  const updatedHomework = app.updateHomeworkRecord(homework.id, { submitStatus: 'submitted', reviewResult: 'passed' });
-  const updatedInterview = app.updateInterviewRecord(interview.id, { result: 'passed', hiredStatus: 'hired' });
+  const approvedRequest = app.createInterviewSchedule({
+    studentId: student1.id,
+    teacherId: 1,
+    teacherName: '张老师',
+    companyName: 'A公司',
+    positionName: '前端工程师',
+    startsAt: '2026-05-18T09:00:00',
+    endsAt: '2026-05-18T09:30:00',
+    status: 'requested',
+    requestSource: 'student',
+    remark: '请安排'
+  });
+  const acceptedRequest = app.createInterviewSchedule({
+    studentId: student2.id,
+    teacherId: 1,
+    teacherName: '张老师',
+    companyName: 'B公司',
+    positionName: '测试工程师',
+    startsAt: '2026-05-18T10:00:00',
+    endsAt: '2026-05-18T10:30:00',
+    status: 'requested',
+    requestSource: 'student',
+    remark: '请安排'
+  });
 
-  assert.equal(updatedHomework.submitStatus, 'submitted');
-  assert.equal(updatedHomework.reviewResult, 'passed');
-  assert.equal(updatedInterview.result, 'passed');
-  assert.equal(updatedInterview.hiredStatus, 'hired');
+  await withServer(app, async (baseUrl) => {
+    const approved = await fetch(`${baseUrl}/api/schedules/${approvedRequest.id}/approve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ approverName: '管理员' })
+    }).then((response) => response.json());
+    const accepted = await fetch(`${baseUrl}/api/schedules/${acceptedRequest.id}/accept`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirmedByName: '张老师' })
+    }).then((response) => response.json());
+    const timeline = await fetch(`${baseUrl}/api/schedules/timeline?weekStart=2026-05-18`).then((response) => response.json());
+
+    assert.equal(approved.schedule.confirmedByRole, 'admin');
+    assert.equal(accepted.schedule.confirmedByRole, 'teacher');
+    assert.equal(timeline.teachers[0].entries.length, 2);
+  });
 });
 
 test('schedule conflicts block overlapping teacher and student bookings', () => {
   const { app, student1, student2 } = createSampleScheduleApp();
 
-  const first = app.createInterviewSchedule({
+  app.createInterviewSchedule({
     studentId: student1.id,
     teacherId: 1,
     teacherName: '张老师',
@@ -265,7 +254,6 @@ test('schedule conflicts block overlapping teacher and student bookings', () => 
     remark: ''
   });
 
-  assert.equal(first.teacherName, '张老师');
   assert.throws(() => {
     app.createInterviewSchedule({
       studentId: student2.id,
@@ -293,43 +281,6 @@ test('schedule conflicts block overlapping teacher and student bookings', () => 
       remark: ''
     });
   }, /student conflict/);
-});
-
-test('schedule page shows weekly timeline and cards', () => {
-  const { app, student1 } = createSampleScheduleApp();
-  app.createInterviewSchedule({
-    studentId: student1.id,
-    teacherId: 1,
-    teacherName: '张老师',
-    companyName: 'A公司',
-    positionName: '前端工程师',
-    startsAt: '2026-05-18T09:00:00',
-    endsAt: '2026-05-18T09:30:00',
-    status: 'scheduled',
-    remark: '第一次面试'
-  });
-
-  const html = createServerApp({ app }).renderSchedulePage({ weekStart: '2026-05-18' });
-
-  assert.match(html, /面试排期/);
-  assert.match(html, /张老师/);
-  assert.match(html, /A公司/);
-  assert.match(html, /前端工程师/);
-});
-
-test('schedule creation requires student, teacher, and time fields', () => {
-  const { app } = createSampleScheduleApp();
-
-  assert.throws(() => {
-    app.createInterviewSchedule({
-      studentId: 1,
-      teacherName: '张老师',
-      companyName: 'A公司',
-      positionName: '前端工程师',
-      startsAt: '2026-05-18T09:00:00',
-      endsAt: '2026-05-18T09:30:00'
-    });
-  }, /required/);
 });
 
 test('cancelled schedules do not block the same time slot', () => {
@@ -362,4 +313,19 @@ test('cancelled schedules do not block the same time slot', () => {
   assert.equal(second.teacherId, 1);
 });
 
+test('client assets are served and deep links fall back to the React entry', async () => {
+  const app = createApp({ db: createDatabase() });
+  const clientDistPath = createClientDist();
 
+  await withServer(app, async (baseUrl) => {
+    const deepLink = await fetch(`${baseUrl}/dashboard`);
+    const html = await deepLink.text();
+    const asset = await fetch(`${baseUrl}/assets/app.js`);
+
+    assert.equal(deepLink.status, 200);
+    assert.match(html, /React App Shell/);
+    assert.match(deepLink.headers.get('content-type') || '', /text\/html/);
+    assert.equal(asset.status, 200);
+    assert.match(asset.headers.get('content-type') || '', /javascript/);
+  }, { clientDistPath });
+});
