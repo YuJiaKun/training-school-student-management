@@ -1,5 +1,17 @@
-function createApp({ db }) {
+const crypto = require('node:crypto');
+
+const DEFAULT_SESSION_MAX_AGE_SECONDS = 60 * 60 * 8;
+const DEFAULT_AUTH_ACCOUNTS = [
+  { username: 'admin', password: 'admin123', role: 'admin' },
+  { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1 },
+  { username: 'student', password: 'student123', role: 'student', studentId: 1 }
+];
+const VALID_ROLES = new Set(['admin', 'teacher', 'student']);
+
+function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessionMaxAgeSeconds = DEFAULT_SESSION_MAX_AGE_SECONDS }) {
   const sessions = new Map();
+  const accounts = normalizeAuthAccounts(authAccounts);
+  const sessionMaxAgeMs = Number(sessionMaxAgeSeconds || DEFAULT_SESSION_MAX_AGE_SECONDS) * 1000;
 
   return {
     createStudent(input) {
@@ -240,6 +252,7 @@ function createApp({ db }) {
       const from = `${days[0]}T00:00:00`;
       const to = `${days[6]}T23:59:59`;
       const entries = this.listInterviewSchedules({ from, to }).items
+        .filter((schedule) => !filters.teacherId || schedule.teacherId === Number(filters.teacherId))
         .filter((schedule) => schedule.status === 'confirmed')
         .sort((left, right) => left.startsAt.localeCompare(right.startsAt));
       const teachers = [];
@@ -254,6 +267,20 @@ function createApp({ db }) {
       }
 
       return { weeks: days, teachers };
+    },
+
+    getStudentWorkspace(session) {
+      if (!session?.studentId) throw new Error('student account not bound');
+      const studentId = Number(session.studentId);
+      const student = db.students.find((item) => item.id === studentId);
+      if (!student) throw new Error('student not found');
+
+      return {
+        student,
+        homeworkRecords: this.listHomeworkRecords({ studentId }).items,
+        interviewRecords: this.listInterviewRecords({ studentId }).items,
+        schedules: this.listInterviewSchedules({ studentId }).items
+      };
     },
 
     getDashboardStats() {
@@ -272,24 +299,36 @@ function createApp({ db }) {
     },
 
     login({ username, password }) {
-      const roleMap = {
-        admin: { password: 'admin123', role: 'admin' },
-        teacher: { password: 'teacher123', role: 'teacher' },
-        student: { password: 'student123', role: 'student' }
-      };
-      const account = roleMap[username];
+      clearExpiredSessions(sessions);
+      const account = accounts.find((item) => item.username === String(username || '').trim());
       if (!account || account.password !== password) {
         throw new Error('invalid credentials');
       }
-      const token = `session-${sessions.size + 1}`;
-      const session = { role: account.role, username };
-      if (account.role === 'teacher') session.teacherId = 1;
+      const token = crypto.randomUUID();
+      const session = {
+        role: account.role,
+        username: account.username,
+        teacherId: account.teacherId || null,
+        studentId: account.studentId || null,
+        expiresAt: Date.now() + sessionMaxAgeMs
+      };
       sessions.set(token, session);
       return { token, role: account.role };
     },
 
     getSession(token) {
-      return sessions.get(token) || null;
+      const session = sessions.get(token);
+      if (!session) return null;
+      if (session.expiresAt <= Date.now()) {
+        sessions.delete(token);
+        return null;
+      }
+      return session;
+    },
+
+    logout(token) {
+      if (!token) return;
+      sessions.delete(token);
     },
 
     saveDatabase() {
@@ -323,6 +362,37 @@ function createApp({ db }) {
       return toCsv(rows);
     }
   };
+}
+
+function normalizeAuthAccounts(authAccounts) {
+  if (!Array.isArray(authAccounts) || authAccounts.length === 0) {
+    throw new Error('auth accounts are required');
+  }
+
+  return authAccounts.map((account) => {
+    const username = String(account.username || '').trim();
+    const password = String(account.password || '');
+    const role = String(account.role || '').trim();
+
+    if (!username || !password || !VALID_ROLES.has(role)) {
+      throw new Error('invalid auth account config');
+    }
+
+    return {
+      username,
+      password,
+      role,
+      teacherId: account.teacherId ? Number(account.teacherId) : null,
+      studentId: account.studentId ? Number(account.studentId) : null
+    };
+  });
+}
+
+function clearExpiredSessions(sessions) {
+  const now = Date.now();
+  for (const [token, session] of sessions.entries()) {
+    if (session.expiresAt <= now) sessions.delete(token);
+  }
 }
 
 function confirmInterviewSchedule(db, id, input, confirmedByRole) {
@@ -381,4 +451,9 @@ function csvCell(value) {
   return text;
 }
 
-module.exports = { createApp };
+module.exports = {
+  createApp: createAppWithOptions,
+  DEFAULT_AUTH_ACCOUNTS,
+  DEFAULT_SESSION_MAX_AGE_SECONDS,
+  normalizeAuthAccounts
+};

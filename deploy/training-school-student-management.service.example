@@ -1,0 +1,20 @@
+[Unit]
+Description=Training School Student Management
+After=network.target
+
+[Service]
+Type=simple
+User=training-school
+Group=training-school
+WorkingDirectory=/opt/training-school-student-management
+EnvironmentFile=/etc/training-school-student-management.env
+ExecStart=/usr/bin/node src/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/training-school-student-management
+
+[Install]
+WantedBy=multi-user.target

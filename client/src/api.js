@@ -1,7 +1,9 @@
 const DEFAULT_ERROR_TEXT = '请求失败，请稍后重试';
+const LOGIN_EXPIRED_TEXT = '登录状态已失效，请重新登录';
+const AUTH_EXPIRED_EVENT = 'auth:expired';
 
 const ERROR_TEXT_MAP = {
-  unauthorized: '登录状态已失效，请重新登录',
+  unauthorized: LOGIN_EXPIRED_TEXT,
   'invalid credentials': '账号或密码不正确',
   'not found': '请求的资源不存在',
   'name and phone are required': '请填写学生姓名和手机号',
@@ -36,7 +38,14 @@ async function request(method, path, body) {
 
   const payload = await parsePayload(response);
   if (!response.ok) {
-    throw new Error(toDisplayError(payload?.error || response.statusText));
+    const sessionExpired =
+      response.status === 401 && payload?.error !== 'invalid credentials' && path !== '/api/me';
+    if (sessionExpired) notifyAuthExpired();
+    const errorText =
+      sessionExpired
+        ? LOGIN_EXPIRED_TEXT
+        : toDisplayError(payload?.error || response.statusText);
+    throw new Error(errorText);
   }
 
   return payload;
@@ -58,6 +67,11 @@ export function toDisplayError(error) {
   return ERROR_TEXT_MAP[text] || text || DEFAULT_ERROR_TEXT;
 }
 
+function notifyAuthExpired() {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
+}
+
 export function apiGet(path) {
   return request('GET', path);
 }
@@ -75,3 +89,5 @@ export const api = {
   post: apiPost,
   patch: apiPatch
 };
+
+export { AUTH_EXPIRED_EVENT, LOGIN_EXPIRED_TEXT };

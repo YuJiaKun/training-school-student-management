@@ -36,6 +36,23 @@ function createClientDist() {
   return dir;
 }
 
+async function loginAs(baseUrl, username = 'admin', password = `${username}123`) {
+  const response = await fetch(`${baseUrl}/api/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  });
+  const cookie = response.headers.get('set-cookie');
+
+  assert.equal(response.status, 200);
+  assert.match(cookie || '', /session=/);
+  return cookie;
+}
+
+function jsonHeaders(cookie) {
+  return { 'content-type': 'application/json', cookie };
+}
+
 test('student lifecycle supports create, archive, query, stats, and export', () => {
   const db = createDatabase();
   const app = createApp({ db });
@@ -90,20 +107,21 @@ test('student api creates, updates, filters, and archives records over http', as
   const app = createApp({ db: createDatabase() });
 
   await withServer(app, async (baseUrl) => {
+    const cookie = await loginAs(baseUrl);
     const created = await fetch(`${baseUrl}/api/students`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: jsonHeaders(cookie),
       body: JSON.stringify({ name: 'Alice', phone: '13800000001', className: '前端1班', enrolledAt: '2026-05-01' })
     }).then((response) => response.json());
 
     const updated = await fetch(`${baseUrl}/api/students/${created.student.id}`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
+      headers: jsonHeaders(cookie),
       body: JSON.stringify({ phone: '13900000001', remark: '已更新' })
     }).then((response) => response.json());
 
-    const filtered = await fetch(`${baseUrl}/api/students?keyword=13900000001`).then((response) => response.json());
-    const archived = await fetch(`${baseUrl}/api/students/${created.student.id}/archive`, { method: 'POST' }).then((response) => response.json());
+    const filtered = await fetch(`${baseUrl}/api/students?keyword=13900000001`, { headers: { cookie } }).then((response) => response.json());
+    const archived = await fetch(`${baseUrl}/api/students/${created.student.id}/archive`, { method: 'POST', headers: { cookie } }).then((response) => response.json());
 
     assert.equal(updated.student.phone, '13900000001');
     assert.equal(filtered.total, 1);
@@ -125,21 +143,22 @@ test('homework and interview records can be listed, filtered, updated, and expor
   assert.equal(app.listInterviewRecords({ result: 'failed' }).items[0].companyName, 'B公司');
 
   await withServer(app, async (baseUrl) => {
+    const cookie = await loginAs(baseUrl);
     const homework = app.listHomeworkRecords({ submitStatus: 'pending' }).items[0];
     const interview = app.listInterviewRecords({ result: 'failed' }).items[0];
 
     const updatedHomework = await fetch(`${baseUrl}/api/homework/${homework.id}`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
+      headers: jsonHeaders(cookie),
       body: JSON.stringify({ submitStatus: 'submitted', reviewResult: 'passed' })
     }).then((response) => response.json());
     const updatedInterview = await fetch(`${baseUrl}/api/interviews/${interview.id}`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
+      headers: jsonHeaders(cookie),
       body: JSON.stringify({ result: 'passed', hiredStatus: 'hired' })
     }).then((response) => response.json());
-    const homeworkCsv = await fetch(`${baseUrl}/api/export/homework?className=${encodeURIComponent('前端1班')}`).then((response) => response.text());
-    const interviewCsv = await fetch(`${baseUrl}/api/export/interviews?result=passed`).then((response) => response.text());
+    const homeworkCsv = await fetch(`${baseUrl}/api/export/homework?className=${encodeURIComponent('前端1班')}`, { headers: { cookie } }).then((response) => response.text());
+    const interviewCsv = await fetch(`${baseUrl}/api/export/interviews?result=passed`, { headers: { cookie } }).then((response) => response.text());
 
     assert.equal(updatedHomework.record.reviewResult, 'passed');
     assert.equal(updatedInterview.record.hiredStatus, 'hired');
@@ -180,12 +199,154 @@ test('login returns a role based session and /api/me exposes the current user', 
   });
 });
 
+test('invalid logins are rejected and business apis require a session', async () => {
+  const app = createApp({ db: createDatabase() });
+  app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+
+  await withServer(app, async (baseUrl) => {
+    const login = await fetch(`${baseUrl}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'wrong-password' })
+    });
+    const me = await fetch(`${baseUrl}/api/me`);
+    const students = await fetch(`${baseUrl}/api/students`);
+    const exportStudents = await fetch(`${baseUrl}/api/export/students`);
+
+    assert.equal(login.status, 401);
+    assert.doesNotMatch(login.headers.get('set-cookie') || '', /session=/);
+    assert.equal(me.status, 401);
+    assert.equal(students.status, 401);
+    assert.equal(exportStudents.status, 401);
+  });
+});
+
+test('logout deletes the server session and production cookies include security attributes', async () => {
+  const app = createApp({ db: createDatabase() });
+
+  await withServer(app, async (baseUrl) => {
+    const cookie = await loginAs(baseUrl, 'teacher', 'teacher123');
+    assert.match(cookie, /HttpOnly/);
+    assert.match(cookie, /SameSite=Lax/);
+    assert.match(cookie, /Max-Age=123/);
+    assert.match(cookie, /Secure/);
+
+    const logout = await fetch(`${baseUrl}/api/logout`, { method: 'POST', headers: { cookie } });
+    const meAfterLogout = await fetch(`${baseUrl}/api/me`, { headers: { cookie } });
+
+    assert.equal(logout.status, 200);
+    assert.equal(meAfterLogout.status, 401);
+  }, { cookieSecure: true, sessionMaxAgeSeconds: 123 });
+});
+
+test('role permissions protect admin apis and teacher schedule ownership', async () => {
+  const { app, student1 } = createSampleScheduleApp();
+  const teacherSchedule = app.createInterviewSchedule({
+    studentId: student1.id,
+    teacherId: 1,
+    teacherName: '张老师',
+    companyName: 'A公司',
+    positionName: '前端工程师',
+    startsAt: '2026-05-18T09:00:00',
+    endsAt: '2026-05-18T09:30:00',
+    status: 'requested',
+    requestSource: 'student',
+    remark: ''
+  });
+
+  await withServer(app, async (baseUrl) => {
+    const adminCookie = await loginAs(baseUrl);
+    const teacherCookie = await loginAs(baseUrl, 'teacher', 'teacher123');
+    const studentCookie = await loginAs(baseUrl, 'student', 'student123');
+
+    const adminStudents = await fetch(`${baseUrl}/api/students`, { headers: { cookie: adminCookie } });
+    const teacherStudents = await fetch(`${baseUrl}/api/students`, { headers: { cookie: teacherCookie } });
+    const studentStudents = await fetch(`${baseUrl}/api/students`, { headers: { cookie: studentCookie } });
+    const teacherOwnSchedules = await fetch(`${baseUrl}/api/schedules?teacherId=1`, { headers: { cookie: teacherCookie } });
+    const teacherOtherSchedules = await fetch(`${baseUrl}/api/schedules?teacherId=2`, { headers: { cookie: teacherCookie } });
+    const teacherApprove = await fetch(`${baseUrl}/api/schedules/${teacherSchedule.id}/approve`, {
+      method: 'POST',
+      headers: jsonHeaders(teacherCookie),
+      body: JSON.stringify({ approverName: '张老师' })
+    });
+    const teacherAccept = await fetch(`${baseUrl}/api/schedules/${teacherSchedule.id}/accept`, {
+      method: 'POST',
+      headers: jsonHeaders(teacherCookie),
+      body: JSON.stringify({ confirmedByName: '张老师' })
+    });
+
+    assert.equal(adminStudents.status, 200);
+    assert.equal(teacherStudents.status, 403);
+    assert.equal(studentStudents.status, 403);
+    assert.equal(teacherOwnSchedules.status, 200);
+    assert.equal(teacherOtherSchedules.status, 403);
+    assert.equal(teacherApprove.status, 403);
+    assert.equal(teacherAccept.status, 200);
+  });
+});
+
+test('student workspace only returns the bound student and only allows own schedule requests', async () => {
+  const db = createDatabase();
+  const studentApp = createApp({
+    db,
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'student-a', password: 'student123', role: 'student', studentId: 1 }
+    ]
+  });
+  const alice = studentApp.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const bob = studentApp.createStudent({ name: 'Bob', phone: '13800000002', className: '前端1班' });
+  studentApp.addHomeworkRecord({ studentId: alice.id, homeworkName: 'HTML作业', submitStatus: 'submitted' });
+  studentApp.addHomeworkRecord({ studentId: bob.id, homeworkName: 'SQL作业', submitStatus: 'pending' });
+  studentApp.addInterviewRecord({ studentId: alice.id, companyName: 'A公司', positionName: '前端工程师' });
+
+  await withServer(studentApp, async (baseUrl) => {
+    const cookie = await loginAs(baseUrl, 'student-a', 'student123');
+    const workspace = await fetch(`${baseUrl}/api/student-workspace`, { headers: { cookie } }).then((response) => response.json());
+    const students = await fetch(`${baseUrl}/api/students`, { headers: { cookie } });
+    const otherSchedule = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({
+        studentId: bob.id,
+        teacherId: 1,
+        teacherName: '张老师',
+        companyName: 'B公司',
+        positionName: '测试工程师',
+        startsAt: '2026-05-18T10:00:00',
+        endsAt: '2026-05-18T10:30:00'
+      })
+    });
+    const ownSchedule = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({
+        studentId: alice.id,
+        teacherId: 1,
+        teacherName: '张老师',
+        companyName: 'A公司',
+        positionName: '前端工程师',
+        startsAt: '2026-05-18T11:00:00',
+        endsAt: '2026-05-18T11:30:00'
+      })
+    });
+
+    assert.equal(workspace.student.id, alice.id);
+    assert.equal(workspace.homeworkRecords.length, 1);
+    assert.equal(workspace.interviewRecords.length, 1);
+    assert.equal(students.status, 403);
+    assert.equal(otherSchedule.status, 403);
+    assert.equal(ownSchedule.status, 201);
+  });
+});
+
 test('dashboard stats are available for the frontend', async () => {
   const app = createApp({ db: createDatabase() });
   app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
 
   await withServer(app, async (baseUrl) => {
-    const stats = await fetch(`${baseUrl}/api/dashboard/stats`).then((response) => response.json());
+    const cookie = await loginAs(baseUrl);
+    const stats = await fetch(`${baseUrl}/api/dashboard/stats`, { headers: { cookie } }).then((response) => response.json());
 
     assert.equal(stats.students.total, 1);
     assert.equal(stats.homework.total, 0);
@@ -221,17 +382,19 @@ test('schedule workflow supports request, approval, teacher acceptance, and time
   });
 
   await withServer(app, async (baseUrl) => {
+    const adminCookie = await loginAs(baseUrl);
+    const teacherCookie = await loginAs(baseUrl, 'teacher', 'teacher123');
     const approved = await fetch(`${baseUrl}/api/schedules/${approvedRequest.id}/approve`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: jsonHeaders(adminCookie),
       body: JSON.stringify({ approverName: '管理员' })
     }).then((response) => response.json());
     const accepted = await fetch(`${baseUrl}/api/schedules/${acceptedRequest.id}/accept`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: jsonHeaders(teacherCookie),
       body: JSON.stringify({ confirmedByName: '张老师' })
     }).then((response) => response.json());
-    const timeline = await fetch(`${baseUrl}/api/schedules/timeline?weekStart=2026-05-18`).then((response) => response.json());
+    const timeline = await fetch(`${baseUrl}/api/schedules/timeline?weekStart=2026-05-18`, { headers: { cookie: adminCookie } }).then((response) => response.json());
 
     assert.equal(approved.schedule.confirmedByRole, 'admin');
     assert.equal(accepted.schedule.confirmedByRole, 'teacher');

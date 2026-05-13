@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "commonjs",
+  "engines": {
+    "node": ">=20 <23"
+  },
   "scripts": {
     "dev": "vite --config client/vite.config.mjs --host 127.0.0.1",
     "start": "node src/server.js",

@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 const { createDatabase } = require('./db');
-const { createApp } = require('./app');
+const { createApp, DEFAULT_AUTH_ACCOUNTS, DEFAULT_SESSION_MAX_AGE_SECONDS } = require('./app');
 
 const DEFAULT_CLIENT_DIST = path.join(__dirname, '..', 'client', 'dist');
 const MIME_TYPES = {
@@ -15,7 +15,14 @@ const MIME_TYPES = {
   '.webp': 'image/webp'
 };
 
-function createServerApp({ app, clientDistPath = DEFAULT_CLIENT_DIST }) {
+function createServerApp({
+  app,
+  clientDistPath = DEFAULT_CLIENT_DIST,
+  cookieSecure = false,
+  sessionMaxAgeSeconds = DEFAULT_SESSION_MAX_AGE_SECONDS
+}) {
+  const cookieOptions = { secure: cookieSecure, maxAgeSeconds: sessionMaxAgeSeconds };
+
   return {
     renderClientShell() {
       return readClientIndex(clientDistPath) || renderFallbackShell();
@@ -24,6 +31,7 @@ function createServerApp({ app, clientDistPath = DEFAULT_CLIENT_DIST }) {
     listen(port = 0) {
       const server = http.createServer(async (req, res) => {
         const url = new URL(req.url, 'http://127.0.0.1');
+        const sessionToken = getSessionTokenFromRequest(req);
         const session = getSessionFromRequest(req, app);
 
         try {
@@ -33,28 +41,30 @@ function createServerApp({ app, clientDistPath = DEFAULT_CLIENT_DIST }) {
           }
 
           if (req.method === 'POST' && url.pathname === '/api/login') {
-            await handleApiLogin(req, res, app);
+            await handleApiLogin(req, res, app, cookieOptions);
             return;
           }
 
           if (req.method === 'POST' && url.pathname === '/login') {
-            await handleLegacyLogin(req, res, app);
+            await handleLegacyLogin(req, res, app, cookieOptions);
             return;
           }
 
           if (req.method === 'POST' && url.pathname === '/api/logout') {
+            app.logout(sessionToken);
             res.writeHead(200, {
               'content-type': 'application/json; charset=utf-8',
-              'set-cookie': clearSessionCookie()
+              'set-cookie': clearSessionCookie(cookieOptions)
             });
             res.end(JSON.stringify({ ok: true }));
             return;
           }
 
           if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/logout') {
+            app.logout(sessionToken);
             res.writeHead(302, {
               location: '/',
-              'set-cookie': clearSessionCookie()
+              'set-cookie': clearSessionCookie(cookieOptions)
             });
             res.end();
             return;
@@ -69,127 +79,169 @@ function createServerApp({ app, clientDistPath = DEFAULT_CLIENT_DIST }) {
             return;
           }
 
+          if (url.pathname.startsWith('/api/') && !session) {
+            sendJson(res, 401, { error: 'unauthorized' });
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/student-workspace') {
+            if (!authorize(res, session, ['student'])) return;
+            try {
+              sendJson(res, 200, app.getStudentWorkspace(session));
+            } catch (error) {
+              sendJson(res, error.message === 'student account not bound' ? 403 : 404, { error: error.message });
+            }
+            return;
+          }
+
           if (req.method === 'GET' && url.pathname === '/api/dashboard/stats') {
+            if (!authorize(res, session, ['admin'])) return;
             sendJson(res, 200, app.getDashboardStats());
             return;
           }
 
           if (req.method === 'GET' && url.pathname === '/api/students') {
+            if (!authorize(res, session, ['admin'])) return;
             sendJson(res, 200, app.listStudents(readStudentFilters(url)));
             return;
           }
 
           if (req.method === 'POST' && url.pathname === '/api/students') {
+            if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 201, (body) => ({ student: app.createStudent(body) }), app);
             return;
           }
 
           const studentMatch = url.pathname.match(/^\/api\/students\/(\d+)$/);
           if (studentMatch && req.method === 'PATCH') {
+            if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 200, (body) => ({ student: app.updateStudent(Number(studentMatch[1]), body) }), app);
             return;
           }
 
           const archiveMatch = url.pathname.match(/^\/api\/students\/(\d+)\/archive$/);
           if (archiveMatch && req.method === 'POST') {
+            if (!authorize(res, session, ['admin'])) return;
             mutate(res, 200, () => ({ student: app.archiveStudent(Number(archiveMatch[1])) }), app);
             return;
           }
 
           if (req.method === 'GET' && url.pathname === '/api/homework') {
+            if (!authorize(res, session, ['admin'])) return;
             sendJson(res, 200, app.listHomeworkRecords(readHomeworkFilters(url)));
             return;
           }
 
           if (req.method === 'POST' && url.pathname === '/api/homework') {
+            if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 201, (body) => ({ record: app.addHomeworkRecord(body) }), app);
             return;
           }
 
           const homeworkMatch = url.pathname.match(/^\/api\/homework\/(\d+)$/);
           if (homeworkMatch && req.method === 'PATCH') {
+            if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 200, (body) => ({ record: app.updateHomeworkRecord(Number(homeworkMatch[1]), body) }), app);
             return;
           }
 
           if (req.method === 'GET' && url.pathname === '/api/interviews') {
+            if (!authorize(res, session, ['admin'])) return;
             sendJson(res, 200, app.listInterviewRecords(readInterviewFilters(url)));
             return;
           }
 
           if (req.method === 'POST' && url.pathname === '/api/interviews') {
+            if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 201, (body) => ({ record: app.addInterviewRecord(body) }), app);
             return;
           }
 
           const interviewMatch = url.pathname.match(/^\/api\/interviews\/(\d+)$/);
           if (interviewMatch && req.method === 'PATCH') {
+            if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 200, (body) => ({ record: app.updateInterviewRecord(Number(interviewMatch[1]), body) }), app);
             return;
           }
 
           if (req.method === 'GET' && url.pathname === '/api/schedules/timeline') {
-            sendJson(res, 200, app.listInterviewScheduleTimeline({ weekStart: url.searchParams.get('weekStart') || currentWeekStart() }));
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            const filters = { weekStart: url.searchParams.get('weekStart') || currentWeekStart() };
+            if (session.role === 'teacher') filters.teacherId = session.teacherId;
+            sendJson(res, 200, app.listInterviewScheduleTimeline(filters));
             return;
           }
 
           if (req.method === 'GET' && url.pathname === '/api/schedules') {
-            sendJson(res, 200, app.listInterviewSchedules(readScheduleFilters(url)));
+            const filters = readScheduleFilters(url);
+            if (!authorizeScheduleList(res, session, filters)) return;
+            sendJson(res, 200, app.listInterviewSchedules(filters));
             return;
           }
 
           if (req.method === 'POST' && url.pathname === '/api/schedules') {
-            await mutateJson(req, res, 201, (body) => ({ schedule: app.requestInterviewSchedule(body) }), app);
+            const body = await readBody(req);
+            if (!authorizeScheduleCreate(res, session, body)) return;
+            mutate(res, 201, () => ({ schedule: app.requestInterviewSchedule(body) }), app);
             return;
           }
 
           const scheduleApproveMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/approve$/);
           if (scheduleApproveMatch && req.method === 'POST') {
+            if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 200, (body) => ({ schedule: app.approveInterviewSchedule(Number(scheduleApproveMatch[1]), body) }), app);
             return;
           }
 
           const scheduleAcceptMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/accept$/);
           if (scheduleAcceptMatch && req.method === 'POST') {
+            if (!authorizeScheduleAction(res, session, app, Number(scheduleAcceptMatch[1]), ['admin', 'teacher'])) return;
             await mutateJson(req, res, 200, (body) => ({ schedule: app.acceptInterviewSchedule(Number(scheduleAcceptMatch[1]), body) }), app);
             return;
           }
 
           const scheduleRejectMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/reject$/);
           if (scheduleRejectMatch && req.method === 'POST') {
+            if (!authorizeScheduleAction(res, session, app, Number(scheduleRejectMatch[1]), ['admin', 'teacher'])) return;
             mutate(res, 200, () => ({ schedule: app.rejectInterviewSchedule(Number(scheduleRejectMatch[1])) }), app);
             return;
           }
 
           const scheduleCancelMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/cancel$/);
           if (scheduleCancelMatch && req.method === 'POST') {
+            if (!authorizeScheduleAction(res, session, app, Number(scheduleCancelMatch[1]), ['admin', 'teacher'])) return;
             mutate(res, 200, () => ({ schedule: app.cancelInterviewSchedule(Number(scheduleCancelMatch[1])) }), app);
             return;
           }
 
           const scheduleCompleteMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/complete$/);
           if (scheduleCompleteMatch && req.method === 'POST') {
+            if (!authorizeScheduleAction(res, session, app, Number(scheduleCompleteMatch[1]), ['admin', 'teacher'])) return;
             mutate(res, 200, () => ({ schedule: app.completeInterviewSchedule(Number(scheduleCompleteMatch[1])) }), app);
             return;
           }
 
           const scheduleMatch = url.pathname.match(/^\/api\/schedules\/(\d+)$/);
           if (scheduleMatch && req.method === 'PATCH') {
+            if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 200, (body) => ({ schedule: app.updateInterviewSchedule(Number(scheduleMatch[1]), body) }), app);
             return;
           }
 
           if (req.method === 'GET' && url.pathname === '/api/export/students') {
+            if (!authorize(res, session, ['admin'])) return;
             sendText(res, 200, app.exportStudents(readStudentFilters(url)), 'text/csv; charset=utf-8');
             return;
           }
 
           if (req.method === 'GET' && url.pathname === '/api/export/homework') {
+            if (!authorize(res, session, ['admin'])) return;
             sendText(res, 200, app.exportHomeworkRecords(readHomeworkFilters(url)), 'text/csv; charset=utf-8');
             return;
           }
 
           if (req.method === 'GET' && url.pathname === '/api/export/interviews') {
+            if (!authorize(res, session, ['admin'])) return;
             sendText(res, 200, app.exportInterviewRecords(readInterviewFilters(url)), 'text/csv; charset=utf-8');
             return;
           }
@@ -215,14 +267,14 @@ function createServerApp({ app, clientDistPath = DEFAULT_CLIENT_DIST }) {
   };
 }
 
-async function handleApiLogin(req, res, app) {
+async function handleApiLogin(req, res, app, cookieOptions) {
   try {
     const body = await readBody(req);
     const login = app.login({ username: body.username, password: body.password });
     const session = app.getSession(login.token);
     res.writeHead(200, {
       'content-type': 'application/json; charset=utf-8',
-      'set-cookie': sessionCookie(login.token)
+      'set-cookie': sessionCookie(login.token, cookieOptions)
     });
     res.end(JSON.stringify({ user: sessionToUser(session) }));
   } catch (error) {
@@ -230,13 +282,13 @@ async function handleApiLogin(req, res, app) {
   }
 }
 
-async function handleLegacyLogin(req, res, app) {
+async function handleLegacyLogin(req, res, app, cookieOptions) {
   try {
     const body = await readBody(req);
     const login = app.login({ username: body.username, password: body.password });
     res.writeHead(302, {
       location: '/dashboard',
-      'set-cookie': sessionCookie(login.token)
+      'set-cookie': sessionCookie(login.token, cookieOptions)
     });
     res.end();
   } catch (error) {
@@ -263,6 +315,75 @@ function mutate(res, statusCode, handler, app) {
   } catch (error) {
     sendJson(res, 400, { error: error.message });
   }
+}
+
+function authorize(res, session, roles) {
+  if (roles.includes(session.role)) return true;
+  sendJson(res, 403, { error: 'forbidden' });
+  return false;
+}
+
+function authorizeScheduleList(res, session, filters) {
+  if (session.role === 'admin') return true;
+
+  if (session.role === 'teacher') {
+    if (!session.teacherId) {
+      sendJson(res, 403, { error: 'forbidden' });
+      return false;
+    }
+    if (filters.teacherId && Number(filters.teacherId) !== Number(session.teacherId)) {
+      sendJson(res, 403, { error: 'forbidden' });
+      return false;
+    }
+    filters.teacherId = String(session.teacherId);
+    return true;
+  }
+
+  if (session.role === 'student') {
+    if (!session.studentId) {
+      sendJson(res, 403, { error: 'student account not bound' });
+      return false;
+    }
+    if (filters.studentId && Number(filters.studentId) !== Number(session.studentId)) {
+      sendJson(res, 403, { error: 'forbidden' });
+      return false;
+    }
+    filters.studentId = String(session.studentId);
+    return true;
+  }
+
+  sendJson(res, 403, { error: 'forbidden' });
+  return false;
+}
+
+function authorizeScheduleCreate(res, session, body) {
+  if (session.role === 'admin') return true;
+  if (session.role !== 'student') {
+    sendJson(res, 403, { error: 'forbidden' });
+    return false;
+  }
+  if (!session.studentId) {
+    sendJson(res, 403, { error: 'student account not bound' });
+    return false;
+  }
+  if (Number(body.studentId) !== Number(session.studentId)) {
+    sendJson(res, 403, { error: 'forbidden' });
+    return false;
+  }
+  return true;
+}
+
+function authorizeScheduleAction(res, session, app, scheduleId, roles) {
+  if (!authorize(res, session, roles)) return false;
+  if (session.role !== 'teacher') return true;
+
+  const schedule = app.listInterviewSchedules().items.find((item) => item.id === scheduleId);
+  if (!schedule || Number(schedule.teacherId) !== Number(session.teacherId)) {
+    sendJson(res, 403, { error: 'forbidden' });
+    return false;
+  }
+
+  return true;
 }
 
 function persist(app) {
@@ -352,9 +473,14 @@ function renderFallbackShell() {
 }
 
 function getSessionFromRequest(req, app) {
+  const token = getSessionTokenFromRequest(req);
+  if (!token) return null;
+  return app.getSession(token);
+}
+
+function getSessionTokenFromRequest(req) {
   const cookie = parseCookies(req.headers.cookie || '');
-  if (!cookie.session) return null;
-  return app.getSession(cookie.session);
+  return cookie.session || null;
 }
 
 function parseCookies(header) {
@@ -371,16 +497,27 @@ function sessionToUser(session) {
   return {
     username: session.username,
     role: session.role,
-    teacherId: session.teacherId || null
+    teacherId: session.teacherId || null,
+    studentId: session.studentId || null
   };
 }
 
-function sessionCookie(token) {
-  return `session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax`;
+function sessionCookie(token, options = {}) {
+  const parts = [
+    `session=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${Number(options.maxAgeSeconds || DEFAULT_SESSION_MAX_AGE_SECONDS)}`
+  ];
+  if (options.secure) parts.push('Secure');
+  return parts.join('; ');
 }
 
-function clearSessionCookie() {
-  return 'session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax';
+function clearSessionCookie(options = {}) {
+  const parts = ['session=', 'Path=/', 'Max-Age=0', 'HttpOnly', 'SameSite=Lax'];
+  if (options.secure) parts.push('Secure');
+  return parts.join('; ');
 }
 
 function readBody(req) {
@@ -428,27 +565,63 @@ function currentWeekStart() {
 }
 
 if (require.main === module) {
-  const port = Number(process.env.PORT || 3000);
-  const filePath = process.env.DATA_FILE || './data/data.json';
-  const db = createDatabase({ filePath });
-  const app = createApp({ db });
-  const server = createServerApp({ app }).listen(port);
+  let server;
+  try {
+    const port = Number(process.env.PORT || 3000);
+    const filePath = process.env.DATA_FILE || './data/data.json';
+    const sessionMaxAgeSeconds = Number(process.env.SESSION_MAX_AGE_SECONDS || DEFAULT_SESSION_MAX_AGE_SECONDS);
+    const db = createDatabase({ filePath });
+    const app = createApp({
+      db,
+      authAccounts: readAuthAccountsFromEnv(process.env),
+      sessionMaxAgeSeconds
+    });
+    server = createServerApp({
+      app,
+      cookieSecure: process.env.COOKIE_SECURE === undefined
+        ? process.env.NODE_ENV === 'production'
+        : readBoolean(process.env.COOKIE_SECURE),
+      sessionMaxAgeSeconds
+    }).listen(port);
 
-  server.on('listening', () => {
-    const address = server.address();
-    const actualPort = typeof address === 'object' && address ? address.port : port;
-    console.log(`学生管理系统已启动：http://127.0.0.1:${actualPort}`);
-    console.log(`数据文件：${filePath}`);
-  });
+    server.on('listening', () => {
+      const address = server.address();
+      const actualPort = typeof address === 'object' && address ? address.port : port;
+      console.log(`学生管理系统已启动：http://127.0.0.1:${actualPort}`);
+      console.log(`数据文件：${filePath}`);
+    });
 
-  server.on('error', (error) => {
-    if (error.code === 'EADDRINUSE') {
-      console.error(`端口 ${port} 已被占用，请设置 PORT 使用其他端口，例如：PORT=3001 npm start`);
-    } else {
-      console.error(`启动失败：${error.message}`);
-    }
+    server.on('error', (error) => {
+      if (error.code === 'EADDRINUSE') {
+        console.error(`端口 ${port} 已被占用，请设置 PORT 使用其他端口，例如：PORT=3001 npm start`);
+      } else {
+        console.error(`启动失败：${error.message}`);
+      }
+      process.exit(1);
+    });
+  } catch (error) {
+    console.error(`启动失败：${error.message}`);
     process.exit(1);
-  });
+  }
 }
 
-module.exports = { createServerApp };
+function readAuthAccountsFromEnv(env) {
+  if (!env.AUTH_ACCOUNTS) {
+    if (env.NODE_ENV === 'production') {
+      throw new Error('生产环境必须配置 AUTH_ACCOUNTS');
+    }
+    return DEFAULT_AUTH_ACCOUNTS;
+  }
+
+  const parsed = JSON.parse(env.AUTH_ACCOUNTS);
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error('AUTH_ACCOUNTS 必须是非空 JSON 数组');
+  }
+  return parsed;
+}
+
+function readBoolean(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').toLowerCase());
+}
+
+module.exports = { createServerApp, readAuthAccountsFromEnv };

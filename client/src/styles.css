@@ -113,6 +113,11 @@ textarea:disabled {
   padding: 34px;
 }
 
+.login-copy {
+  display: grid;
+  gap: 4px;
+}
+
 .login-copy h1,
 .page-header h1,
 .topbar h1 {
@@ -122,6 +127,7 @@ textarea:disabled {
 
 .login-copy h1 {
   font-size: clamp(30px, 4vw, 46px);
+  line-height: 1.12;
 }
 
 .login-copy p,
@@ -145,6 +151,27 @@ textarea:disabled {
   margin-top: 24px;
   display: grid;
   gap: 14px;
+}
+
+.password-field {
+  position: relative;
+}
+
+.password-field input {
+  padding-right: 76px;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  min-height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  padding: 0 10px;
+  font-weight: 800;
 }
 
 .login-form label,
@@ -219,7 +246,7 @@ textarea:focus {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.demo-accounts button {
+.demo-account {
   display: grid;
   gap: 4px;
   text-align: left;
@@ -227,11 +254,25 @@ textarea:focus {
   border-radius: 8px;
   background: var(--surface-soft);
   padding: 12px;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.demo-account:hover,
+.demo-account.is-selected {
+  border-color: var(--primary);
+  background: #f5f9ff;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
 .demo-accounts span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.demo-accounts small {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .login-side {
@@ -268,6 +309,13 @@ textarea:focus {
   border-radius: 8px;
   padding: 12px 14px;
   font-weight: 700;
+}
+
+.form-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .form-error,
