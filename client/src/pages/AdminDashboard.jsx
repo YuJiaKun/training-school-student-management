@@ -15,15 +15,28 @@ function percent(part, total) {
 
 export default function AdminDashboard() {
   const [stats, setStats] = useState(defaultStats);
+  const [queues, setQueues] = useState({ schedules: [], homework: [], interviews: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
     let active = true;
     setLoading(true);
-    apiGet('/api/dashboard/stats')
-      .then((data) => {
+    Promise.all([
+      apiGet('/api/dashboard/stats'),
+      apiGet('/api/schedules?status=requested'),
+      apiGet('/api/homework?submitStatus=pending'),
+      apiGet('/api/interviews?result=pending')
+    ])
+      .then(([data, scheduleData, homeworkData, interviewData]) => {
         if (active) setStats({ ...defaultStats, ...data });
+        if (active) {
+          setQueues({
+            schedules: (scheduleData.items || []).slice(0, 5),
+            homework: (homeworkData.items || []).slice(0, 5),
+            interviews: (interviewData.items || []).slice(0, 5)
+          });
+        }
       })
       .catch((err) => {
         if (active) setError(err.message || '总览数据加载失败');
@@ -67,6 +80,27 @@ export default function AdminDashboard() {
       </div>
 
       <div className="quick-entry-grid">
+        <QueuePanel title="待处理排期" items={queues.schedules} emptyText="暂无待审批排期" renderItem={(item) => (
+          <>
+            <strong>{item.studentName || `学生 #${item.studentId}`}</strong>
+            <span>{item.companyName || '未填写公司'} / {item.startsAt?.replace('T', ' ').slice(0, 16) || '未设置时间'}</span>
+          </>
+        )} />
+        <QueuePanel title="待提交作业" items={queues.homework} emptyText="暂无待提交作业" renderItem={(item) => (
+          <>
+            <strong>{item.homeworkName || '未命名作业'}</strong>
+            <span>学生 #{item.studentId} / {item.className || '未填写班级'}</span>
+          </>
+        )} />
+        <QueuePanel title="近期面试" items={queues.interviews} emptyText="暂无待反馈面试" renderItem={(item) => (
+          <>
+            <strong>{item.companyName || '未填写公司'}</strong>
+            <span>学生 #{item.studentId} / {item.interviewAt ? item.interviewAt.replace('T', ' ').slice(0, 16) : '未设置时间'}</span>
+          </>
+        )} />
+      </div>
+
+      <div className="quick-entry-grid">
         <article className="quick-entry">
           <h2>学生管理</h2>
           <p>维护学员档案、在读状态和归档记录，支持按关键词和状态快速检索。</p>
@@ -85,5 +119,19 @@ export default function AdminDashboard() {
         </article>
       </div>
     </section>
+  );
+}
+
+function QueuePanel({ title, items, emptyText, renderItem }) {
+  return (
+    <article className="quick-entry queue-panel">
+      <h2>{title}</h2>
+      {!items.length ? <p>{emptyText}</p> : null}
+      {items.map((item) => (
+        <div className="queue-item" key={item.id}>
+          {renderItem(item)}
+        </div>
+      ))}
+    </article>
   );
 }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiGet, apiPatch, apiPost } from '../api.js';
 import StatusBadge from '../components/StatusBadge.jsx';
+import { buildPath } from '../utils/url.js';
 
 const emptyForm = {
   studentId: '',
@@ -13,25 +14,20 @@ const emptyForm = {
   remark: ''
 };
 
-function buildPath(path, params) {
-  const query = new URLSearchParams();
-  Object.entries(params || {}).forEach(([key, value]) => {
-    if (value) query.set(key, value);
-  });
-  const text = query.toString();
-  return text ? `${path}?${text}` : path;
-}
-
 export default function InterviewsPage() {
   const [records, setRecords] = useState([]);
   const [students, setStudents] = useState([]);
   const [result, setResult] = useState('');
   const [form, setForm] = useState(emptyForm);
+  const [editingId, setEditingId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const filters = useMemo(() => ({ result }), [result]);
   const exportUrl = buildPath('/api/export/interviews', filters);
+  const studentNameById = useMemo(() => {
+    return new Map(students.map((student) => [Number(student.id), student.name]));
+  }, [students]);
 
   async function loadData() {
     setLoading(true);
@@ -58,12 +54,36 @@ export default function InterviewsPage() {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
+  function startEdit(record) {
+    setEditingId(record.id);
+    setForm({
+      studentId: String(record.studentId || ''),
+      companyName: record.companyName || '',
+      positionName: record.positionName || '',
+      interviewAt: record.interviewAt || '',
+      result: record.result || 'pending',
+      feedback: record.feedback || '',
+      hiredStatus: record.hiredStatus || 'pending',
+      remark: record.remark || ''
+    });
+  }
+
+  function resetForm() {
+    setEditingId(null);
+    setForm(emptyForm);
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
     setError('');
     try {
-      await apiPost('/api/interviews', { ...form, studentId: Number(form.studentId) });
-      setForm(emptyForm);
+      const payload = { ...form, studentId: Number(form.studentId) };
+      if (editingId) {
+        await apiPatch(`/api/interviews/${editingId}`, payload);
+      } else {
+        await apiPost('/api/interviews', payload);
+      }
+      resetForm();
       await loadData();
     } catch (err) {
       setError(err.message || '面试记录保存失败');
@@ -103,7 +123,7 @@ export default function InterviewsPage() {
       {error ? <div className="alert alert-error">{error}</div> : null}
 
       <form className="panel form-grid" onSubmit={handleSubmit}>
-        <h2>新增面试记录</h2>
+        <h2>{editingId ? '编辑面试记录' : '新增面试记录'}</h2>
         <select required value={form.studentId} onChange={(event) => updateForm('studentId', event.target.value)}>
           <option value="">选择学生</option>
           {students.map((student) => (
@@ -125,7 +145,8 @@ export default function InterviewsPage() {
         </select>
         <textarea value={form.feedback} onChange={(event) => updateForm('feedback', event.target.value)} placeholder="面试反馈" />
         <div className="form-actions">
-          <button className="button button-primary" type="submit">新增面试记录</button>
+          <button className="button button-primary" type="submit">{editingId ? '保存修改' : '新增面试记录'}</button>
+          {editingId ? <button className="button button-secondary" type="button" onClick={resetForm}>取消编辑</button> : null}
         </div>
       </form>
 
@@ -136,7 +157,7 @@ export default function InterviewsPage() {
             <tr>
               <th>公司</th>
               <th>岗位</th>
-              <th>学生 ID</th>
+              <th>学生</th>
               <th>面试时间</th>
               <th>结果</th>
               <th>入职状态</th>
@@ -148,11 +169,12 @@ export default function InterviewsPage() {
               <tr key={record.id}>
                 <td>{record.companyName || '-'}</td>
                 <td>{record.positionName || '-'}</td>
-                <td>{record.studentId}</td>
+                <td>{studentNameById.get(Number(record.studentId)) || `#${record.studentId}`}</td>
                 <td>{record.interviewAt ? record.interviewAt.replace('T', ' ').slice(0, 16) : '-'}</td>
                 <td><StatusBadge status={record.result} /></td>
                 <td><StatusBadge status={record.hiredStatus} /></td>
                 <td className="table-actions">
+                  <button type="button" onClick={() => startEdit(record)}>编辑</button>
                   <button type="button" onClick={() => updateRecord(record, { result: 'passed' })}>通过</button>
                   <button type="button" onClick={() => updateRecord(record, { result: 'failed' })}>未通过</button>
                   <button type="button" onClick={() => updateRecord(record, { hiredStatus: 'hired' })}>已入职</button>

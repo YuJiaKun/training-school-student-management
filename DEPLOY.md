@@ -136,6 +136,8 @@ sudo install -d -o training-school -g training-school /var/backups/training-scho
 sudo cp /var/lib/training-school-student-management/data.json /var/backups/training-school-student-management/data-$(date +%F-%H%M%S).json
 ```
 
+应用每次保存数据时会先写入 `data.json.tmp`，成功后替换正式文件，并把替换前的正式文件保留为 `data.json.bak`。这个 `.bak` 只代表最近一次写入前的文件，不能替代长期备份。
+
 恢复时先停止服务，再覆盖数据文件：
 
 ```bash
@@ -143,6 +145,13 @@ sudo systemctl stop training-school-student-management
 sudo cp /var/backups/training-school-student-management/data-YYYY-MM-DD-HHMMSS.json /var/lib/training-school-student-management/data.json
 sudo chown training-school:training-school /var/lib/training-school-student-management/data.json
 sudo systemctl start training-school-student-management
+```
+
+恢复后建议立即检查：
+
+```bash
+sudo journalctl -u training-school-student-management -n 80 --no-pager
+curl -i http://127.0.0.1:3000/health
 ```
 
 ## 9. 发布更新和回滚
@@ -175,10 +184,12 @@ sudo systemctl restart training-school-student-management
 
 - `npm ci` 和 `npm run build` 已成功完成。
 - `/etc/training-school-student-management.env` 已替换示例账号和密码。
+- `AUTH_ACCOUNTS` 未保留 `admin123`、`teacher123`、`student123` 或 `change-me-*` 示例密码。
 - `DATA_FILE` 所在目录归属为 `training-school:training-school`，服务用户可写。
 - `systemctl status training-school-student-management` 显示服务正在运行。
 - `curl http://127.0.0.1:3000/health` 返回 `{"status":"ok"}`。
 - `nginx -t` 通过，Nginx 已 reload。
 - `https://example.com/health` 返回 `{"status":"ok"}`。
 - 浏览器可打开站点首页，并能完成登录、查看列表、新增记录等核心流程。
+- 管理员可完成学生 CSV 导入预览、确认导入、导出 CSV；导出文件在表格软件中应正常显示中文。
 - 已记录备份目录和回滚提交或标签。

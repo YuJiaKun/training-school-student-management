@@ -492,3 +492,217 @@ test('client assets are served and deep links fall back to the React entry', asy
     assert.match(asset.headers.get('content-type') || '', /javascript/);
   }, { clientDistPath });
 });
+
+test('records reject unknown students and invalid status values', () => {
+  const app = createApp({ db: createDatabase() });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+
+  assert.throws(() => {
+    app.addHomeworkRecord({ studentId: 999, homeworkName: 'HTML作业', submitStatus: 'pending' });
+  }, /student not found/);
+
+  assert.throws(() => {
+    app.addHomeworkRecord({ studentId: alice.id, homeworkName: 'HTML作业', submitStatus: 'done' });
+  }, /invalid homework submit status/);
+
+  assert.throws(() => {
+    app.addInterviewRecord({ studentId: alice.id, companyName: 'A公司', result: 'unknown' });
+  }, /invalid interview result/);
+
+  assert.throws(() => {
+    app.addInterviewRecord({ studentId: alice.id, companyName: 'A公司', hiredStatus: 'maybe' });
+  }, /invalid hired status/);
+
+  const homework = app.addHomeworkRecord({ studentId: String(alice.id), homeworkName: 'CSS作业' });
+  const interview = app.addInterviewRecord({ studentId: String(alice.id), companyName: 'B公司' });
+
+  assert.equal(homework.studentId, alice.id);
+  assert.equal(interview.studentId, alice.id);
+});
+
+test('homework and interview edits can move records to another existing student', () => {
+  const app = createApp({ db: createDatabase() });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: 'Java1班' });
+  const homework = app.addHomeworkRecord({ studentId: alice.id, homeworkName: 'HTML作业' });
+  const interview = app.addInterviewRecord({ studentId: alice.id, companyName: 'A公司' });
+
+  assert.equal(app.updateHomeworkRecord(homework.id, { studentId: bob.id }).studentId, bob.id);
+  assert.equal(app.updateInterviewRecord(interview.id, { studentId: bob.id }).studentId, bob.id);
+  assert.throws(() => {
+    app.updateHomeworkRecord(homework.id, { studentId: 999 });
+  }, /student not found/);
+});
+
+test('schedule state machine rejects invalid and terminal transitions', () => {
+  const { app, student1, student2 } = createSampleScheduleApp();
+  const requested = app.createInterviewSchedule({
+    studentId: student1.id,
+    teacherId: 1,
+    teacherName: '张老师',
+    companyName: 'A公司',
+    positionName: '前端工程师',
+    startsAt: '2026-05-18T09:00:00',
+    endsAt: '2026-05-18T09:30:00',
+    status: 'requested',
+    requestSource: 'student'
+  });
+  const confirmed = app.createInterviewSchedule({
+    studentId: student2.id,
+    teacherId: 1,
+    teacherName: '张老师',
+    companyName: 'B公司',
+    positionName: '测试工程师',
+    startsAt: '2026-05-18T10:00:00',
+    endsAt: '2026-05-18T10:30:00',
+    status: 'confirmed'
+  });
+
+  app.rejectInterviewSchedule(requested.id);
+  assert.throws(() => {
+    app.approveInterviewSchedule(requested.id, { approverName: '管理员' });
+  }, /invalid schedule transition/);
+
+  app.completeInterviewSchedule(confirmed.id);
+  assert.throws(() => {
+    app.cancelInterviewSchedule(confirmed.id);
+  }, /invalid schedule transition/);
+});
+
+test('admin schedule creation confirms immediately and teachers are exposed over http', async () => {
+  const app = createApp({ db: createDatabase() });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+
+  await withServer(app, async (baseUrl) => {
+    const cookie = await loginAs(baseUrl);
+    const created = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({
+        studentId: alice.id,
+        teacherId: 1,
+        teacherName: '张老师',
+        companyName: 'A公司',
+        positionName: '前端工程师',
+        startsAt: '2026-05-18T09:00:00',
+        endsAt: '2026-05-18T09:30:00'
+      })
+    }).then((response) => response.json());
+    const teachers = await fetch(`${baseUrl}/api/teachers`, { headers: { cookie } }).then((response) => response.json());
+
+    assert.equal(created.schedule.status, 'confirmed');
+    assert.equal(created.schedule.confirmedByRole, 'admin');
+    assert.deepEqual(teachers.items, [{ id: 1, name: '张老师' }]);
+  });
+});
+
+test('oversized request bodies are rejected before mutation', async () => {
+  const app = createApp({ db: createDatabase() });
+
+  await withServer(app, async (baseUrl) => {
+    const cookie = await loginAs(baseUrl);
+    const response = await fetch(`${baseUrl}/api/students`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({ name: 'Alice', phone: '13800000001', remark: 'x'.repeat(1024 * 1024 + 1) })
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 413);
+    assert.equal(payload.error, 'request body too large');
+    assert.equal(app.listStudents().total, 0);
+  });
+});
+
+test('login failures are throttled temporarily', async () => {
+  const app = createApp({ db: createDatabase() });
+
+  await withServer(app, async (baseUrl) => {
+    for (let index = 0; index < 5; index += 1) {
+      const response = await fetch(`${baseUrl}/api/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'admin', password: 'wrong-password' })
+      });
+      assert.equal(response.status, 401);
+    }
+
+    const throttled = await fetch(`${baseUrl}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'wrong-password' })
+    });
+    const payload = await throttled.json();
+
+    assert.equal(throttled.status, 429);
+    assert.equal(payload.error, 'too many login attempts');
+  });
+});
+
+test('database saves with schema version, backup, and explicit damaged file errors', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'student-management-stable-'));
+  const filePath = path.join(tempDir, 'data.json');
+  fs.writeFileSync(filePath, JSON.stringify({
+    students: [{ id: 1, name: 'Alice', phone: '13800000001' }],
+    nextStudentId: 2
+  }));
+
+  const db = createDatabase({ filePath });
+  assert.equal(db.schemaVersion, 1);
+  assert.equal(db.students[0].status, 'active');
+
+  db.save();
+  const saved = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+
+  assert.equal(saved.schemaVersion, 1);
+  assert.equal(fs.existsSync(`${filePath}.tmp`), false);
+  assert.equal(fs.existsSync(`${filePath}.bak`), true);
+
+  fs.writeFileSync(filePath, '{broken json');
+  assert.throws(() => {
+    createDatabase({ filePath });
+  }, /database file is not valid JSON/);
+});
+
+test('student CSV export includes UTF-8 BOM for spreadsheet compatibility', () => {
+  const app = createApp({ db: createDatabase() });
+  app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+
+  const csv = app.exportStudents();
+
+  assert.equal(csv.charCodeAt(0), 0xfeff);
+  assert.match(csv, /Alice/);
+});
+
+test('student import preview validates rows and commit creates valid students', async () => {
+  const app = createApp({ db: createDatabase() });
+  const importText = [
+    '姓名,手机号,班级/课程',
+    'Alice,13800000001,前端1班',
+    ',13900000002,Java1班',
+    'Bob,13800000001,Java1班'
+  ].join('\n');
+
+  await withServer(app, async (baseUrl) => {
+    const cookie = await loginAs(baseUrl);
+    const preview = await fetch(`${baseUrl}/api/students/import/preview`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({ text: importText })
+    }).then((response) => response.json());
+
+    assert.equal(preview.validCount, 1);
+    assert.equal(preview.invalidCount, 2);
+    assert.deepEqual(preview.rows[1].errors, ['姓名不能为空']);
+    assert.deepEqual(preview.rows[2].errors, ['手机号重复']);
+
+    const commit = await fetch(`${baseUrl}/api/students/import/commit`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({ text: '姓名,手机号,班级/课程\nCharlie,13800000003,前端2班\nDana,13800000004,Java2班' })
+    }).then((response) => response.json());
+
+    assert.equal(commit.created.length, 2);
+    assert.equal(app.listStudents().total, 2);
+  });
+});

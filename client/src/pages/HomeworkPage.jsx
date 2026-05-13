@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiGet, apiPatch, apiPost } from '../api.js';
 import StatusBadge from '../components/StatusBadge.jsx';
+import { buildPath } from '../utils/url.js';
 
 const emptyForm = {
   studentId: '',
@@ -12,25 +13,20 @@ const emptyForm = {
   remark: ''
 };
 
-function buildPath(path, params) {
-  const query = new URLSearchParams();
-  Object.entries(params || {}).forEach(([key, value]) => {
-    if (value) query.set(key, value);
-  });
-  const text = query.toString();
-  return text ? `${path}?${text}` : path;
-}
-
 export default function HomeworkPage() {
   const [records, setRecords] = useState([]);
   const [students, setStudents] = useState([]);
   const [submitStatus, setSubmitStatus] = useState('');
   const [form, setForm] = useState(emptyForm);
+  const [editingId, setEditingId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const filters = useMemo(() => ({ submitStatus }), [submitStatus]);
   const exportUrl = buildPath('/api/export/homework', filters);
+  const studentNameById = useMemo(() => {
+    return new Map(students.map((student) => [Number(student.id), student.name]));
+  }, [students]);
 
   async function loadData() {
     setLoading(true);
@@ -57,12 +53,35 @@ export default function HomeworkPage() {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
+  function startEdit(record) {
+    setEditingId(record.id);
+    setForm({
+      studentId: String(record.studentId || ''),
+      homeworkName: record.homeworkName || '',
+      className: record.className || '',
+      submitStatus: record.submitStatus || 'pending',
+      submitAt: record.submitAt || '',
+      reviewResult: record.reviewResult || '',
+      remark: record.remark || ''
+    });
+  }
+
+  function resetForm() {
+    setEditingId(null);
+    setForm(emptyForm);
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
     setError('');
     try {
-      await apiPost('/api/homework', { ...form, studentId: Number(form.studentId) });
-      setForm(emptyForm);
+      const payload = { ...form, studentId: Number(form.studentId) };
+      if (editingId) {
+        await apiPatch(`/api/homework/${editingId}`, payload);
+      } else {
+        await apiPost('/api/homework', payload);
+      }
+      resetForm();
       await loadData();
     } catch (err) {
       setError(err.message || '作业记录保存失败');
@@ -102,7 +121,7 @@ export default function HomeworkPage() {
       {error ? <div className="alert alert-error">{error}</div> : null}
 
       <form className="panel form-grid" onSubmit={handleSubmit}>
-        <h2>新增作业记录</h2>
+        <h2>{editingId ? '编辑作业记录' : '新增作业记录'}</h2>
         <select required value={form.studentId} onChange={(event) => updateForm('studentId', event.target.value)}>
           <option value="">选择学生</option>
           {students.map((student) => (
@@ -120,7 +139,8 @@ export default function HomeworkPage() {
         <input value={form.reviewResult} onChange={(event) => updateForm('reviewResult', event.target.value)} placeholder="批改结果" />
         <textarea value={form.remark} onChange={(event) => updateForm('remark', event.target.value)} placeholder="备注" />
         <div className="form-actions">
-          <button className="button button-primary" type="submit">新增作业记录</button>
+          <button className="button button-primary" type="submit">{editingId ? '保存修改' : '新增作业记录'}</button>
+          {editingId ? <button className="button button-secondary" type="button" onClick={resetForm}>取消编辑</button> : null}
         </div>
       </form>
 
@@ -130,7 +150,7 @@ export default function HomeworkPage() {
           <thead>
             <tr>
               <th>作业名称</th>
-              <th>学生 ID</th>
+              <th>学生</th>
               <th>班级/课程</th>
               <th>提交状态</th>
               <th>提交时间</th>
@@ -142,12 +162,13 @@ export default function HomeworkPage() {
             {records.map((record) => (
               <tr key={record.id}>
                 <td>{record.homeworkName || '-'}</td>
-                <td>{record.studentId}</td>
+                <td>{studentNameById.get(Number(record.studentId)) || `#${record.studentId}`}</td>
                 <td>{record.className || '-'}</td>
                 <td><StatusBadge status={record.submitStatus} /></td>
                 <td>{record.submitAt || '-'}</td>
                 <td>{record.reviewResult ? <StatusBadge status={record.reviewResult} /> : '-'}</td>
                 <td className="table-actions">
+                  <button type="button" onClick={() => startEdit(record)}>编辑</button>
                   <button type="button" onClick={() => updateRecord(record, { submitStatus: 'submitted', submitAt: new Date().toISOString().slice(0, 10) })}>标记提交</button>
                   <button type="button" onClick={() => updateRecord(record, { submitStatus: 'reviewed', reviewResult: record.reviewResult || '已批改' })}>标记批改</button>
                 </td>

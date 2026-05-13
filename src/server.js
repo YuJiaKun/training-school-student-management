@@ -14,14 +14,17 @@ const MIME_TYPES = {
   '.svg': 'image/svg+xml',
   '.webp': 'image/webp'
 };
+const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 
 function createServerApp({
   app,
   clientDistPath = DEFAULT_CLIENT_DIST,
   cookieSecure = false,
-  sessionMaxAgeSeconds = DEFAULT_SESSION_MAX_AGE_SECONDS
+  sessionMaxAgeSeconds = DEFAULT_SESSION_MAX_AGE_SECONDS,
+  maxBodyBytes = DEFAULT_MAX_BODY_BYTES
 }) {
   const cookieOptions = { secure: cookieSecure, maxAgeSeconds: sessionMaxAgeSeconds };
+  const bodyOptions = { maxBytes: maxBodyBytes };
 
   return {
     renderClientShell() {
@@ -41,12 +44,12 @@ function createServerApp({
           }
 
           if (req.method === 'POST' && url.pathname === '/api/login') {
-            await handleApiLogin(req, res, app, cookieOptions);
+            await handleApiLogin(req, res, app, cookieOptions, bodyOptions);
             return;
           }
 
           if (req.method === 'POST' && url.pathname === '/login') {
-            await handleLegacyLogin(req, res, app, cookieOptions);
+            await handleLegacyLogin(req, res, app, cookieOptions, bodyOptions);
             return;
           }
 
@@ -84,6 +87,11 @@ function createServerApp({
             return;
           }
 
+          if (req.method === 'GET' && url.pathname === '/api/teachers') {
+            sendJson(res, 200, app.listTeachers());
+            return;
+          }
+
           if (req.method === 'GET' && url.pathname === '/api/student-workspace') {
             if (!authorize(res, session, ['student'])) return;
             try {
@@ -106,16 +114,28 @@ function createServerApp({
             return;
           }
 
+          if (req.method === 'POST' && url.pathname === '/api/students/import/preview') {
+            if (!authorize(res, session, ['admin'])) return;
+            await handleJson(req, res, 200, (body) => app.previewStudentImport(body), bodyOptions);
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/students/import/commit') {
+            if (!authorize(res, session, ['admin'])) return;
+            await mutateJson(req, res, 201, (body) => app.importStudents(body), app, bodyOptions);
+            return;
+          }
+
           if (req.method === 'POST' && url.pathname === '/api/students') {
             if (!authorize(res, session, ['admin'])) return;
-            await mutateJson(req, res, 201, (body) => ({ student: app.createStudent(body) }), app);
+            await mutateJson(req, res, 201, (body) => ({ student: app.createStudent(body) }), app, bodyOptions);
             return;
           }
 
           const studentMatch = url.pathname.match(/^\/api\/students\/(\d+)$/);
           if (studentMatch && req.method === 'PATCH') {
             if (!authorize(res, session, ['admin'])) return;
-            await mutateJson(req, res, 200, (body) => ({ student: app.updateStudent(Number(studentMatch[1]), body) }), app);
+            await mutateJson(req, res, 200, (body) => ({ student: app.updateStudent(Number(studentMatch[1]), body) }), app, bodyOptions);
             return;
           }
 
@@ -134,14 +154,14 @@ function createServerApp({
 
           if (req.method === 'POST' && url.pathname === '/api/homework') {
             if (!authorize(res, session, ['admin'])) return;
-            await mutateJson(req, res, 201, (body) => ({ record: app.addHomeworkRecord(body) }), app);
+            await mutateJson(req, res, 201, (body) => ({ record: app.addHomeworkRecord(body) }), app, bodyOptions);
             return;
           }
 
           const homeworkMatch = url.pathname.match(/^\/api\/homework\/(\d+)$/);
           if (homeworkMatch && req.method === 'PATCH') {
             if (!authorize(res, session, ['admin'])) return;
-            await mutateJson(req, res, 200, (body) => ({ record: app.updateHomeworkRecord(Number(homeworkMatch[1]), body) }), app);
+            await mutateJson(req, res, 200, (body) => ({ record: app.updateHomeworkRecord(Number(homeworkMatch[1]), body) }), app, bodyOptions);
             return;
           }
 
@@ -153,14 +173,14 @@ function createServerApp({
 
           if (req.method === 'POST' && url.pathname === '/api/interviews') {
             if (!authorize(res, session, ['admin'])) return;
-            await mutateJson(req, res, 201, (body) => ({ record: app.addInterviewRecord(body) }), app);
+            await mutateJson(req, res, 201, (body) => ({ record: app.addInterviewRecord(body) }), app, bodyOptions);
             return;
           }
 
           const interviewMatch = url.pathname.match(/^\/api\/interviews\/(\d+)$/);
           if (interviewMatch && req.method === 'PATCH') {
             if (!authorize(res, session, ['admin'])) return;
-            await mutateJson(req, res, 200, (body) => ({ record: app.updateInterviewRecord(Number(interviewMatch[1]), body) }), app);
+            await mutateJson(req, res, 200, (body) => ({ record: app.updateInterviewRecord(Number(interviewMatch[1]), body) }), app, bodyOptions);
             return;
           }
 
@@ -180,23 +200,27 @@ function createServerApp({
           }
 
           if (req.method === 'POST' && url.pathname === '/api/schedules') {
-            const body = await readBody(req);
+            const body = await readBody(req, bodyOptions);
             if (!authorizeScheduleCreate(res, session, body)) return;
-            mutate(res, 201, () => ({ schedule: app.requestInterviewSchedule(body) }), app);
+            mutate(res, 201, () => ({
+              schedule: session.role === 'admin'
+                ? app.createAdminInterviewSchedule(body, { username: session.username })
+                : app.requestInterviewSchedule(body)
+            }), app);
             return;
           }
 
           const scheduleApproveMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/approve$/);
           if (scheduleApproveMatch && req.method === 'POST') {
             if (!authorize(res, session, ['admin'])) return;
-            await mutateJson(req, res, 200, (body) => ({ schedule: app.approveInterviewSchedule(Number(scheduleApproveMatch[1]), body) }), app);
+            await mutateJson(req, res, 200, (body) => ({ schedule: app.approveInterviewSchedule(Number(scheduleApproveMatch[1]), body) }), app, bodyOptions);
             return;
           }
 
           const scheduleAcceptMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/accept$/);
           if (scheduleAcceptMatch && req.method === 'POST') {
             if (!authorizeScheduleAction(res, session, app, Number(scheduleAcceptMatch[1]), ['admin', 'teacher'])) return;
-            await mutateJson(req, res, 200, (body) => ({ schedule: app.acceptInterviewSchedule(Number(scheduleAcceptMatch[1]), body) }), app);
+            await mutateJson(req, res, 200, (body) => ({ schedule: app.acceptInterviewSchedule(Number(scheduleAcceptMatch[1]), body) }), app, bodyOptions);
             return;
           }
 
@@ -224,7 +248,7 @@ function createServerApp({
           const scheduleMatch = url.pathname.match(/^\/api\/schedules\/(\d+)$/);
           if (scheduleMatch && req.method === 'PATCH') {
             if (!authorize(res, session, ['admin'])) return;
-            await mutateJson(req, res, 200, (body) => ({ schedule: app.updateInterviewSchedule(Number(scheduleMatch[1]), body) }), app);
+            await mutateJson(req, res, 200, (body) => ({ schedule: app.updateInterviewSchedule(Number(scheduleMatch[1]), body) }), app, bodyOptions);
             return;
           }
 
@@ -258,7 +282,7 @@ function createServerApp({
 
           sendJson(res, 404, { error: 'not found' });
         } catch (error) {
-          sendJson(res, 500, { error: error.message });
+          sendJson(res, error.statusCode || 500, { error: error.message });
         }
       });
 
@@ -267,9 +291,9 @@ function createServerApp({
   };
 }
 
-async function handleApiLogin(req, res, app, cookieOptions) {
+async function handleApiLogin(req, res, app, cookieOptions, bodyOptions) {
   try {
-    const body = await readBody(req);
+    const body = await readBody(req, bodyOptions);
     const login = app.login({ username: body.username, password: body.password });
     const session = app.getSession(login.token);
     res.writeHead(200, {
@@ -278,13 +302,13 @@ async function handleApiLogin(req, res, app, cookieOptions) {
     });
     res.end(JSON.stringify({ user: sessionToUser(session) }));
   } catch (error) {
-    sendJson(res, 401, { error: error.message });
+    sendJson(res, loginErrorStatus(error), { error: error.message });
   }
 }
 
-async function handleLegacyLogin(req, res, app, cookieOptions) {
+async function handleLegacyLogin(req, res, app, cookieOptions, bodyOptions) {
   try {
-    const body = await readBody(req);
+    const body = await readBody(req, bodyOptions);
     const login = app.login({ username: body.username, password: body.password });
     res.writeHead(302, {
       location: '/dashboard',
@@ -292,18 +316,27 @@ async function handleLegacyLogin(req, res, app, cookieOptions) {
     });
     res.end();
   } catch (error) {
-    sendJson(res, 401, { error: error.message });
+    sendJson(res, loginErrorStatus(error), { error: error.message });
   }
 }
 
-async function mutateJson(req, res, statusCode, handler, app) {
+async function mutateJson(req, res, statusCode, handler, app, bodyOptions) {
   try {
-    const body = await readBody(req);
+    const body = await readBody(req, bodyOptions);
     const payload = handler(body);
     persist(app);
     sendJson(res, statusCode, payload);
   } catch (error) {
-    sendJson(res, 400, { error: error.message });
+    sendJson(res, error.statusCode || 400, errorPayload(error));
+  }
+}
+
+async function handleJson(req, res, statusCode, handler, bodyOptions) {
+  try {
+    const body = await readBody(req, bodyOptions);
+    sendJson(res, statusCode, handler(body));
+  } catch (error) {
+    sendJson(res, error.statusCode || 400, errorPayload(error));
   }
 }
 
@@ -388,6 +421,18 @@ function authorizeScheduleAction(res, session, app, scheduleId, roles) {
 
 function persist(app) {
   if (typeof app.saveDatabase === 'function') app.saveDatabase();
+}
+
+function loginErrorStatus(error) {
+  if (error.statusCode) return error.statusCode;
+  if (error.code === 'LOGIN_RATE_LIMITED') return 429;
+  return 401;
+}
+
+function errorPayload(error) {
+  const payload = { error: error.message };
+  if (error.preview) payload.preview = error.preview;
+  return payload;
 }
 
 function readStudentFilters(url) {
@@ -520,22 +565,44 @@ function clearSessionCookie(options = {}) {
   return parts.join('; ');
 }
 
-function readBody(req) {
+function readBody(req, options = {}) {
+  const maxBytes = Number(options.maxBytes || DEFAULT_MAX_BODY_BYTES);
   return new Promise((resolve, reject) => {
     let body = '';
+    let bytes = 0;
+    let tooLarge = false;
     req.setEncoding('utf8');
     req.on('data', (chunk) => {
+      if (tooLarge) return;
+      bytes += Buffer.byteLength(chunk, 'utf8');
+      if (bytes > maxBytes) {
+        tooLarge = true;
+        body = '';
+        return;
+      }
       body += chunk;
     });
     req.on('end', () => {
       try {
         const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+        if (tooLarge) {
+          const error = new Error('request body too large');
+          error.statusCode = 413;
+          reject(error);
+          return;
+        }
         if (!body) {
           resolve({});
           return;
         }
         if (contentType === 'application/x-www-form-urlencoded') {
           resolve(Object.fromEntries(new URLSearchParams(body)));
+          return;
+        }
+        if (contentType && contentType !== 'application/json') {
+          const error = new Error('unsupported content type');
+          error.statusCode = 415;
+          reject(error);
           return;
         }
         resolve(JSON.parse(body));

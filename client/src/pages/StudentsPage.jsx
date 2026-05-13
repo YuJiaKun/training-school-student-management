@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiGet, apiPatch, apiPost } from '../api.js';
 import StatusBadge from '../components/StatusBadge.jsx';
+import { buildPath } from '../utils/url.js';
 
 const emptyForm = {
   name: '',
@@ -12,23 +13,18 @@ const emptyForm = {
   remark: ''
 };
 
-function buildPath(path, params) {
-  const query = new URLSearchParams();
-  Object.entries(params || {}).forEach(([key, value]) => {
-    if (value) query.set(key, value);
-  });
-  const text = query.toString();
-  return text ? `${path}?${text}` : path;
-}
-
 export default function StudentsPage() {
   const [students, setStudents] = useState([]);
   const [total, setTotal] = useState(0);
   const [keyword, setKeyword] = useState('');
   const [status, setStatus] = useState('');
   const [form, setForm] = useState(emptyForm);
+  const [importText, setImportText] = useState('');
+  const [importPreview, setImportPreview] = useState(null);
+  const [importMessage, setImportMessage] = useState('');
   const [editingId, setEditingId] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState('');
 
   const filters = useMemo(() => ({ keyword, status }), [keyword, status]);
@@ -90,6 +86,38 @@ export default function StudentsPage() {
     }
   }
 
+  async function previewImport(event) {
+    event.preventDefault();
+    setError('');
+    setImportMessage('');
+    setImporting(true);
+    try {
+      const preview = await apiPost('/api/students/import/preview', { text: importText });
+      setImportPreview(preview);
+    } catch (err) {
+      setError(err.message || '导入预览失败');
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function commitImport() {
+    setError('');
+    setImportMessage('');
+    setImporting(true);
+    try {
+      const result = await apiPost('/api/students/import/commit', { text: importText });
+      setImportPreview(result);
+      setImportMessage(`已导入 ${result.created?.length || 0} 名学生`);
+      setImportText('');
+      await loadStudents();
+    } catch (err) {
+      setError(err.message || '导入学生失败');
+    } finally {
+      setImporting(false);
+    }
+  }
+
   async function archiveStudent(student) {
     setError('');
     try {
@@ -121,6 +149,44 @@ export default function StudentsPage() {
       </div>
 
       {error ? <div className="alert alert-error">{error}</div> : null}
+      {importMessage ? <div className="alert alert-success">{importMessage}</div> : null}
+
+      <form className="panel form-grid" onSubmit={previewImport}>
+        <h2>批量导入学生</h2>
+        <textarea
+          className="form-wide"
+          value={importText}
+          onChange={(event) => {
+            setImportText(event.target.value);
+            setImportPreview(null);
+          }}
+          placeholder="粘贴 CSV 内容，例如：姓名,手机号,班级/课程"
+        />
+        <div className="form-actions">
+          <button className="button button-secondary" type="submit" disabled={importing || !importText.trim()}>预览导入</button>
+          <button
+            className="button button-primary"
+            type="button"
+            onClick={commitImport}
+            disabled={importing || !importPreview || importPreview.invalidCount > 0 || importPreview.validCount === 0}
+          >
+            确认导入
+          </button>
+          {importPreview ? (
+            <span className="muted">可导入 {importPreview.validCount} 条，需修正 {importPreview.invalidCount} 条</span>
+          ) : null}
+        </div>
+        {importPreview?.rows?.length ? (
+          <div className="import-preview form-wide">
+            {importPreview.rows.slice(0, 5).map((row) => (
+              <div className={row.errors.length ? 'preview-row has-error' : 'preview-row'} key={row.rowNumber}>
+                <strong>第 {row.rowNumber} 行：{row.student.name || '未填写姓名'}</strong>
+                <span>{row.errors.length ? row.errors.join('、') : '可导入'}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </form>
 
       <form className="panel form-grid" onSubmit={handleSubmit}>
         <h2>{editingId ? '编辑学生' : '新增学生'}</h2>

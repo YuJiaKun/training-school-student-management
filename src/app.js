@@ -6,23 +6,41 @@ const DEFAULT_AUTH_ACCOUNTS = [
   { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1 },
   { username: 'student', password: 'student123', role: 'student', studentId: 1 }
 ];
+const DEFAULT_TEACHERS = [{ id: 1, name: '张老师' }];
 const VALID_ROLES = new Set(['admin', 'teacher', 'student']);
+const VALID_STUDENT_STATUSES = new Set(['active', 'archived']);
+const VALID_HOMEWORK_SUBMIT_STATUSES = new Set(['pending', 'submitted', 'reviewed']);
+const VALID_INTERVIEW_RESULTS = new Set(['pending', 'passed', 'failed']);
+const VALID_HIRED_STATUSES = new Set(['pending', 'hired', 'not_hired']);
+const VALID_SCHEDULE_STATUSES = new Set(['requested', 'scheduled', 'confirmed', 'rescheduled', 'completed', 'cancelled']);
+const TERMINAL_SCHEDULE_STATUSES = new Set(['completed', 'cancelled']);
+const MAX_LOGIN_FAILURES = 5;
+const LOGIN_LOCK_MS = 5 * 60 * 1000;
 
-function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessionMaxAgeSeconds = DEFAULT_SESSION_MAX_AGE_SECONDS }) {
+function createAppWithOptions({
+  db,
+  authAccounts = DEFAULT_AUTH_ACCOUNTS,
+  teachers = DEFAULT_TEACHERS,
+  sessionMaxAgeSeconds = DEFAULT_SESSION_MAX_AGE_SECONDS
+}) {
   const sessions = new Map();
+  const loginFailures = new Map();
   const accounts = normalizeAuthAccounts(authAccounts);
+  const teacherDirectory = normalizeTeachers(teachers);
   const sessionMaxAgeMs = Number(sessionMaxAgeSeconds || DEFAULT_SESSION_MAX_AGE_SECONDS) * 1000;
 
   return {
     createStudent(input) {
-      if (!input.name || !input.phone) {
+      const name = String(input.name || '').trim();
+      const phone = String(input.phone || '').trim();
+      if (!name || !phone) {
         throw new Error('name and phone are required');
       }
 
       const student = {
         id: db.nextStudentId++,
-        name: input.name,
-        phone: input.phone,
+        name,
+        phone,
         gender: input.gender || '',
         birthday: input.birthday || '',
         className: input.className || '',
@@ -65,6 +83,21 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
       return { items: items.slice(start, start + pageSize), total: items.length };
     },
 
+    previewStudentImport(input = {}) {
+      return previewStudentImport(db, input.text || input.csv || '');
+    },
+
+    importStudents(input = {}) {
+      const preview = this.previewStudentImport(input);
+      if (preview.invalidCount > 0) {
+        const error = new Error('student import contains invalid rows');
+        error.preview = preview;
+        throw error;
+      }
+      const created = preview.rows.map((row) => this.createStudent(row.student));
+      return { ...preview, created };
+    },
+
     archiveStudent(id) {
       const student = db.students.find((item) => item.id === id);
       if (!student) throw new Error('student not found');
@@ -74,12 +107,14 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
     },
 
     addHomeworkRecord(input) {
+      const studentId = requireExistingStudent(db, input.studentId).id;
+      const submitStatus = normalizeEnum(input.submitStatus || 'pending', VALID_HOMEWORK_SUBMIT_STATUSES, 'invalid homework submit status');
       const record = {
         id: db.nextHomeworkId++,
-        studentId: input.studentId,
+        studentId,
         homeworkName: input.homeworkName || '',
         className: input.className || '',
-        submitStatus: input.submitStatus || 'pending',
+        submitStatus,
         submitAt: input.submitAt || '',
         reviewResult: input.reviewResult || '',
         remark: input.remark || ''
@@ -91,9 +126,14 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
     updateHomeworkRecord(id, patch) {
       const record = db.homeworkRecords.find((item) => item.id === id);
       if (!record) throw new Error('homework record not found');
+      if (patch.studentId !== undefined) {
+        record.studentId = requireExistingStudent(db, patch.studentId).id;
+      }
       record.homeworkName = patch.homeworkName ?? record.homeworkName;
       record.className = patch.className ?? record.className;
-      record.submitStatus = patch.submitStatus ?? record.submitStatus;
+      record.submitStatus = patch.submitStatus === undefined
+        ? record.submitStatus
+        : normalizeEnum(patch.submitStatus, VALID_HOMEWORK_SUBMIT_STATUSES, 'invalid homework submit status');
       record.submitAt = patch.submitAt ?? record.submitAt;
       record.reviewResult = patch.reviewResult ?? record.reviewResult;
       record.remark = patch.remark ?? record.remark;
@@ -111,15 +151,18 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
     },
 
     addInterviewRecord(input) {
+      const studentId = requireExistingStudent(db, input.studentId).id;
+      const result = normalizeEnum(input.result || 'pending', VALID_INTERVIEW_RESULTS, 'invalid interview result');
+      const hiredStatus = normalizeEnum(input.hiredStatus || 'pending', VALID_HIRED_STATUSES, 'invalid hired status');
       const record = {
         id: db.nextInterviewId++,
-        studentId: input.studentId,
+        studentId,
         companyName: input.companyName || '',
         positionName: input.positionName || '',
         interviewAt: input.interviewAt || '',
-        result: input.result || '',
+        result,
         feedback: input.feedback || '',
-        hiredStatus: input.hiredStatus || '',
+        hiredStatus,
         remark: input.remark || ''
       };
       db.interviewRecords.push(record);
@@ -129,12 +172,19 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
     updateInterviewRecord(id, patch) {
       const record = db.interviewRecords.find((item) => item.id === id);
       if (!record) throw new Error('interview record not found');
+      if (patch.studentId !== undefined) {
+        record.studentId = requireExistingStudent(db, patch.studentId).id;
+      }
       record.companyName = patch.companyName ?? record.companyName;
       record.positionName = patch.positionName ?? record.positionName;
       record.interviewAt = patch.interviewAt ?? record.interviewAt;
-      record.result = patch.result ?? record.result;
+      record.result = patch.result === undefined
+        ? record.result
+        : normalizeEnum(patch.result, VALID_INTERVIEW_RESULTS, 'invalid interview result');
       record.feedback = patch.feedback ?? record.feedback;
-      record.hiredStatus = patch.hiredStatus ?? record.hiredStatus;
+      record.hiredStatus = patch.hiredStatus === undefined
+        ? record.hiredStatus
+        : normalizeEnum(patch.hiredStatus, VALID_HIRED_STATUSES, 'invalid hired status');
       record.remark = patch.remark ?? record.remark;
       return record;
     },
@@ -151,20 +201,20 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
 
     createInterviewSchedule(input) {
       requireScheduleFields(input);
-      const student = db.students.find((item) => item.id === input.studentId);
-      if (!student) throw new Error('student not found');
+      const student = requireExistingStudent(db, input.studentId);
+      const status = normalizeEnum(input.status || 'scheduled', VALID_SCHEDULE_STATUSES, 'invalid schedule status');
 
       const schedule = {
         id: db.nextInterviewScheduleId++,
-        studentId: input.studentId,
+        studentId: student.id,
         studentName: student.name,
-        teacherId: input.teacherId,
+        teacherId: normalizeRequiredId(input.teacherId, 'teacherId is required'),
         teacherName: input.teacherName,
         companyName: input.companyName || '',
         positionName: input.positionName || '',
         startsAt: input.startsAt,
         endsAt: input.endsAt,
-        status: input.status || 'scheduled',
+        status,
         requestSource: input.requestSource || '',
         confirmedByRole: input.confirmedByRole || '',
         confirmedByName: input.confirmedByName || '',
@@ -188,6 +238,7 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
     rejectInterviewSchedule(id) {
       const schedule = db.interviewSchedules.find((item) => item.id === id);
       if (!schedule) throw new Error('schedule not found');
+      assertScheduleTransition(schedule, ['requested'], 'cancelled');
       schedule.status = 'cancelled';
       return schedule;
     },
@@ -195,9 +246,21 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
     requestInterviewSchedule(input) {
       return this.createInterviewSchedule({ ...input, status: 'requested', requestSource: 'student' });
     },
+
+    createAdminInterviewSchedule(input, session = {}) {
+      return this.createInterviewSchedule({
+        ...input,
+        status: 'confirmed',
+        requestSource: input.requestSource || 'admin',
+        confirmedByRole: 'admin',
+        confirmedByName: session.confirmedByName || session.username || '管理员',
+        confirmedAt: input.confirmedAt || new Date().toISOString()
+      });
+    },
     updateInterviewSchedule(id, patch) {
       const schedule = db.interviewSchedules.find((item) => item.id === id);
       if (!schedule) throw new Error('schedule not found');
+      assertScheduleIsEditable(schedule);
 
       const nextSchedule = {
         ...schedule,
@@ -210,10 +273,13 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
         endsAt: patch.endsAt ?? schedule.endsAt,
         remark: patch.remark ?? schedule.remark
       };
-      const student = db.students.find((item) => item.id === nextSchedule.studentId);
-      if (!student) throw new Error('student not found');
+      const student = requireExistingStudent(db, nextSchedule.studentId);
+      nextSchedule.studentId = student.id;
+      nextSchedule.teacherId = normalizeRequiredId(nextSchedule.teacherId, 'teacherId is required');
       nextSchedule.studentName = student.name;
-      nextSchedule.status = patch.status ?? (patch.startsAt || patch.endsAt ? 'rescheduled' : schedule.status);
+      nextSchedule.status = patch.status === undefined
+        ? (patch.startsAt || patch.endsAt ? 'rescheduled' : schedule.status)
+        : normalizeEnum(patch.status, VALID_SCHEDULE_STATUSES, 'invalid schedule status');
       requireScheduleFields(nextSchedule);
       assertScheduleTime(nextSchedule);
       assertNoScheduleConflict(db.interviewSchedules, nextSchedule, id);
@@ -224,6 +290,7 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
     cancelInterviewSchedule(id) {
       const schedule = db.interviewSchedules.find((item) => item.id === id);
       if (!schedule) throw new Error('schedule not found');
+      assertScheduleTransition(schedule, ['requested', 'scheduled', 'confirmed', 'rescheduled'], 'cancelled');
       schedule.status = 'cancelled';
       return schedule;
     },
@@ -231,6 +298,7 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
     completeInterviewSchedule(id) {
       const schedule = db.interviewSchedules.find((item) => item.id === id);
       if (!schedule) throw new Error('schedule not found');
+      assertScheduleTransition(schedule, ['scheduled', 'confirmed', 'rescheduled'], 'completed');
       schedule.status = 'completed';
       return schedule;
     },
@@ -298,12 +366,20 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
       };
     },
 
+    listTeachers() {
+      return { items: teacherDirectory.map((teacher) => ({ ...teacher })), total: teacherDirectory.length };
+    },
+
     login({ username, password }) {
       clearExpiredSessions(sessions);
-      const account = accounts.find((item) => item.username === String(username || '').trim());
+      const normalizedUsername = String(username || '').trim();
+      assertLoginAllowed(loginFailures, normalizedUsername);
+      const account = accounts.find((item) => item.username === normalizedUsername);
       if (!account || account.password !== password) {
+        recordLoginFailure(loginFailures, normalizedUsername);
         throw new Error('invalid credentials');
       }
+      loginFailures.delete(normalizedUsername);
       const token = crypto.randomUUID();
       const session = {
         role: account.role,
@@ -341,7 +417,7 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
       for (const student of students) {
         rows.push([student.name, student.phone, student.gender, student.className, student.enrolledAt, student.status, student.remark]);
       }
-      return toCsv(rows);
+      return toCsvWithBom(rows);
     },
 
     exportHomeworkRecords(filters = {}) {
@@ -350,7 +426,7 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
       for (const record of records) {
         rows.push([record.homeworkName, record.studentId, record.className, record.submitStatus, record.submitAt, record.reviewResult, record.remark]);
       }
-      return toCsv(rows);
+      return toCsvWithBom(rows);
     },
 
     exportInterviewRecords(filters = {}) {
@@ -359,7 +435,7 @@ function createAppWithOptions({ db, authAccounts = DEFAULT_AUTH_ACCOUNTS, sessio
       for (const record of records) {
         rows.push([record.companyName, record.positionName, record.studentId, record.interviewAt, record.result, record.feedback, record.hiredStatus, record.remark]);
       }
-      return toCsv(rows);
+      return toCsvWithBom(rows);
     }
   };
 }
@@ -388,6 +464,14 @@ function normalizeAuthAccounts(authAccounts) {
   });
 }
 
+function normalizeTeachers(teachers) {
+  const normalized = Array.isArray(teachers) ? teachers : [];
+  return normalized.map((teacher) => ({
+    id: normalizeRequiredId(teacher.id, 'teacher id is required'),
+    name: String(teacher.name || '').trim() || `老师${teacher.id}`
+  }));
+}
+
 function clearExpiredSessions(sessions) {
   const now = Date.now();
   for (const [token, session] of sessions.entries()) {
@@ -398,6 +482,7 @@ function clearExpiredSessions(sessions) {
 function confirmInterviewSchedule(db, id, input, confirmedByRole) {
   const schedule = db.interviewSchedules.find((item) => item.id === id);
   if (!schedule) throw new Error('schedule not found');
+  assertScheduleTransition(schedule, ['requested'], 'confirmed');
   schedule.status = 'confirmed';
   schedule.confirmedByRole = confirmedByRole;
   schedule.confirmedByName = input.approverName || input.confirmedByName || '';
@@ -426,6 +511,16 @@ function assertNoScheduleConflict(schedules, candidate, ignoreId) {
   }
 }
 
+function assertScheduleTransition(schedule, allowedCurrentStatuses, nextStatus) {
+  if (allowedCurrentStatuses.includes(schedule.status)) return;
+  throw new Error(`invalid schedule transition: ${schedule.status} -> ${nextStatus}`);
+}
+
+function assertScheduleIsEditable(schedule) {
+  if (!TERMINAL_SCHEDULE_STATUSES.has(schedule.status)) return;
+  throw new Error(`invalid schedule transition: ${schedule.status} -> rescheduled`);
+}
+
 function isOverlapping(left, right) {
   return left.startsAt < right.endsAt && left.endsAt > right.startsAt;
 }
@@ -443,6 +538,10 @@ function toCsv(rows) {
   return rows.map((row) => row.map(csvCell).join(',')).join('\n');
 }
 
+function toCsvWithBom(rows) {
+  return `\ufeff${toCsv(rows)}`;
+}
+
 function csvCell(value) {
   const text = String(value ?? '');
   if (/[",\n]/.test(text)) {
@@ -451,9 +550,178 @@ function csvCell(value) {
   return text;
 }
 
+function requireExistingStudent(db, value) {
+  const studentId = normalizeRequiredId(value, 'studentId is required');
+  const student = db.students.find((item) => item.id === studentId);
+  if (!student) throw new Error('student not found');
+  return student;
+}
+
+function normalizeRequiredId(value, message) {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id <= 0) throw new Error(message);
+  return id;
+}
+
+function normalizeEnum(value, validValues, message) {
+  const normalized = String(value || '').trim();
+  if (!validValues.has(normalized)) throw new Error(message);
+  return normalized;
+}
+
+function assertLoginAllowed(loginFailures, username) {
+  const key = username || '<empty>';
+  const current = loginFailures.get(key);
+  if (!current) return;
+  if (current.lockUntil && current.lockUntil > Date.now()) {
+    throw createCodedError('too many login attempts', 'LOGIN_RATE_LIMITED');
+  }
+  if (current.lockUntil && current.lockUntil <= Date.now()) {
+    loginFailures.delete(key);
+  }
+}
+
+function recordLoginFailure(loginFailures, username) {
+  const key = username || '<empty>';
+  const current = loginFailures.get(key) || { count: 0, lockUntil: 0 };
+  const next = { count: current.count + 1, lockUntil: current.lockUntil || 0 };
+  if (next.count >= MAX_LOGIN_FAILURES) {
+    next.lockUntil = Date.now() + LOGIN_LOCK_MS;
+  }
+  loginFailures.set(key, next);
+}
+
+function createCodedError(message, code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function previewStudentImport(db, text) {
+  const rows = parseCsv(text);
+  const { dataRows, header } = splitImportHeader(rows);
+  const existingPhones = new Set(db.students.map((student) => student.phone).filter(Boolean));
+  const seenPhones = new Set();
+  const previewRows = dataRows.map((cells, index) => {
+    const student = readStudentImportRow(cells, header);
+    const errors = [];
+
+    if (!student.name) errors.push('姓名不能为空');
+    if (!student.phone) errors.push('手机号不能为空');
+    if (student.phone && (existingPhones.has(student.phone) || seenPhones.has(student.phone))) {
+      errors.push('手机号重复');
+    }
+    if (student.phone && !seenPhones.has(student.phone)) {
+      seenPhones.add(student.phone);
+    }
+
+    return {
+      rowNumber: header ? index + 2 : index + 1,
+      student,
+      errors
+    };
+  });
+
+  return {
+    rows: previewRows,
+    validCount: previewRows.filter((row) => row.errors.length === 0).length,
+    invalidCount: previewRows.filter((row) => row.errors.length > 0).length
+  };
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let quoted = false;
+  const source = String(text || '').replace(/^\ufeff/, '');
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+
+    if (quoted) {
+      if (char === '"' && next === '"') {
+        cell += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      quoted = true;
+    } else if (char === ',') {
+      row.push(cell.trim());
+      cell = '';
+    } else if (char === '\n') {
+      row.push(cell.trim());
+      rows.push(row);
+      row = [];
+      cell = '';
+    } else if (char !== '\r') {
+      cell += char;
+    }
+  }
+
+  row.push(cell.trim());
+  rows.push(row);
+  return rows.filter((items) => items.some((item) => item));
+}
+
+function splitImportHeader(rows) {
+  if (!rows.length) return { dataRows: [], header: null };
+  const firstRow = rows[0].map((cell) => cell.trim());
+  const hasHeader = firstRow.some((cell) => ['姓名', 'name', '手机号', 'phone'].includes(cell));
+  if (!hasHeader) return { dataRows: rows, header: null };
+
+  const header = {};
+  firstRow.forEach((cell, index) => {
+    const key = normalizeImportHeader(cell);
+    if (key) header[key] = index;
+  });
+  return { dataRows: rows.slice(1), header };
+}
+
+function normalizeImportHeader(cell) {
+  const text = String(cell || '').trim();
+  const aliases = {
+    name: ['姓名', 'name'],
+    phone: ['手机号', '手机', '电话', 'phone'],
+    gender: ['性别', 'gender'],
+    birthday: ['生日', 'birthday'],
+    className: ['班级/课程', '班级', '课程', 'className'],
+    enrolledAt: ['入学时间', '入学日期', 'enrolledAt'],
+    remark: ['备注', 'remark']
+  };
+  return Object.keys(aliases).find((key) => aliases[key].includes(text)) || null;
+}
+
+function readStudentImportRow(cells, header) {
+  const byHeader = (key) => {
+    if (!header || header[key] === undefined) return '';
+    return cells[header[key]] || '';
+  };
+  const byIndex = (index) => cells[index] || '';
+
+  return {
+    name: header ? byHeader('name') : byIndex(0),
+    phone: header ? byHeader('phone') : byIndex(1),
+    gender: header ? byHeader('gender') : byIndex(2),
+    birthday: header ? byHeader('birthday') : byIndex(3),
+    className: header ? byHeader('className') : byIndex(4),
+    enrolledAt: header ? byHeader('enrolledAt') : byIndex(5),
+    remark: header ? byHeader('remark') : byIndex(6)
+  };
+}
+
 module.exports = {
   createApp: createAppWithOptions,
   DEFAULT_AUTH_ACCOUNTS,
+  DEFAULT_TEACHERS,
   DEFAULT_SESSION_MAX_AGE_SECONDS,
   normalizeAuthAccounts
 };

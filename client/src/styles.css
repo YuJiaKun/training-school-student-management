@@ -493,6 +493,33 @@ textarea:focus {
   margin: 0 0 8px;
 }
 
+.import-preview,
+.queue-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.preview-row,
+.queue-item {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px 12px;
+}
+
+.preview-row span,
+.queue-item span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.preview-row.has-error {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
 .toolbar {
   background: var(--surface);
   border: 1px solid var(--line);

@@ -13,8 +13,16 @@ const ERROR_TEXT_MAP = {
   'schedule not found': '未找到对应面试安排',
   'schedule fields are required': '请完整填写面试安排信息',
   'invalid schedule time': '面试开始时间必须早于结束时间',
+  'invalid homework submit status': '作业提交状态无效',
+  'invalid interview result': '面试结果无效',
+  'invalid hired status': '入职状态无效',
+  'invalid schedule status': '排期状态无效',
   'teacher conflict': '该老师在这个时间段已有安排',
-  'student conflict': '该学生在这个时间段已有安排'
+  'student conflict': '该学生在这个时间段已有安排',
+  'request body too large': '请求内容过大，请减少备注内容后再试',
+  'unsupported content type': '请求格式不支持',
+  'too many login attempts': '登录失败次数过多，请稍后再试',
+  'student import contains invalid rows': '导入内容存在错误，请先根据预览修正'
 };
 
 async function request(method, path, body) {
@@ -64,6 +72,9 @@ async function parsePayload(response) {
 export function toDisplayError(error) {
   if (!error) return DEFAULT_ERROR_TEXT;
   const text = String(error).trim();
+  if (text.startsWith('invalid schedule transition')) {
+    return '当前排期状态不允许执行该操作';
+  }
   return ERROR_TEXT_MAP[text] || text || DEFAULT_ERROR_TEXT;
 }
 

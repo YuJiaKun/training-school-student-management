@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { apiGet, apiPost } from '../api.js';
 import StatusBadge, { statusText } from '../components/StatusBadge.jsx';
 
-const DEFAULT_FORM = {
-  teacherId: '1',
-  teacherName: '张老师',
+const EMPTY_FORM = {
+  teacherId: '',
+  teacherName: '',
   companyName: '',
   positionName: '',
   startsAt: '',
@@ -38,12 +38,23 @@ function normalizeWorkspacePayload(payload) {
   };
 }
 
+function applyDefaultTeacher(form, teachers) {
+  if (form.teacherId || !teachers.length) return form;
+  const firstTeacher = teachers[0];
+  return { ...form, teacherId: String(firstTeacher.id), teacherName: firstTeacher.name };
+}
+
+function findTeacher(teachers, teacherId) {
+  return teachers.find((teacher) => Number(teacher.id) === Number(teacherId));
+}
+
 export default function StudentWorkspace({ user = {} }) {
   const [student, setStudent] = useState(null);
   const [homeworkRecords, setHomeworkRecords] = useState([]);
   const [interviewRecords, setInterviewRecords] = useState([]);
   const [schedules, setSchedules] = useState([]);
-  const [form, setForm] = useState(DEFAULT_FORM);
+  const [teachers, setTeachers] = useState([]);
+  const [form, setForm] = useState(EMPTY_FORM);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -55,17 +66,24 @@ export default function StudentWorkspace({ user = {} }) {
     setLoading(true);
     setError('');
     try {
-      const payload = await apiGet('/api/student-workspace');
+      const [payload, teacherPayload] = await Promise.all([
+        apiGet('/api/student-workspace'),
+        apiGet('/api/teachers')
+      ]);
       const workspace = normalizeWorkspacePayload(payload);
+      const teacherItems = Array.isArray(teacherPayload?.items) ? teacherPayload.items : [];
       setStudent(workspace.student);
       setHomeworkRecords(workspace.homeworkRecords);
       setInterviewRecords(workspace.interviewRecords);
       setSchedules(workspace.schedules);
+      setTeachers(teacherItems);
+      setForm((current) => applyDefaultTeacher(current, teacherItems));
     } catch (err) {
       setStudent(null);
       setHomeworkRecords([]);
       setInterviewRecords([]);
       setSchedules([]);
+      setTeachers([]);
       setError(err.message || '学生工作台加载失败');
     } finally {
       setLoading(false);
@@ -95,6 +113,15 @@ export default function StudentWorkspace({ user = {} }) {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
+  function updateTeacher(teacherId) {
+    const teacher = findTeacher(teachers, teacherId);
+    setForm((current) => ({
+      ...current,
+      teacherId,
+      teacherName: teacher?.name || ''
+    }));
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
     if (!student?.id) return;
@@ -113,7 +140,7 @@ export default function StudentWorkspace({ user = {} }) {
         endsAt: form.endsAt,
         remark: form.remark.trim()
       });
-      setForm(DEFAULT_FORM);
+      setForm(applyDefaultTeacher(EMPTY_FORM, teachers));
       setSuccess('排期申请已提交，等待老师接收。');
       await loadStudentData();
     } catch (err) {
@@ -217,12 +244,13 @@ export default function StudentWorkspace({ user = {} }) {
         </div>
         <form className="schedule-form" onSubmit={handleSubmit}>
           <label>
-            老师编号
-            <input disabled={!hasStudent || submitting} value={form.teacherId} onChange={(event) => updateForm('teacherId', event.target.value)} required />
-          </label>
-          <label>
-            老师姓名
-            <input disabled={!hasStudent || submitting} value={form.teacherName} onChange={(event) => updateForm('teacherName', event.target.value)} required />
+            面试老师
+            <select disabled={!hasStudent || submitting || !teachers.length} value={form.teacherId} onChange={(event) => updateTeacher(event.target.value)} required>
+              <option value="">选择老师</option>
+              {teachers.map((teacher) => (
+                <option key={teacher.id} value={teacher.id}>{teacher.name}</option>
+              ))}
+            </select>
           </label>
           <label>
             公司名称
@@ -244,7 +272,7 @@ export default function StudentWorkspace({ user = {} }) {
             申请说明
             <textarea disabled={!hasStudent || submitting} value={form.remark} onChange={(event) => updateForm('remark', event.target.value)} placeholder="补充期望时间、面试形式或其他说明" />
           </label>
-          <button className="button button-primary" type="submit" disabled={!hasStudent || submitting}>
+          <button className="button button-primary" type="submit" disabled={!hasStudent || submitting || !teachers.length}>
             {submitting ? '正在提交...' : '提交排期申请'}
           </button>
         </form>
