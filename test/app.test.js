@@ -433,6 +433,32 @@ test('login returns a role based session and /api/me exposes the current user', 
   });
 });
 
+test('legacy stored account passwords are upgraded to hashes after login', async () => {
+  const db = createDatabase();
+  db.authAccounts.push({
+    id: 1,
+    username: 'legacy-student',
+    password: 'student123',
+    role: 'student',
+    studentId: 1,
+    status: 'active',
+    createdAt: '2026-05-01T00:00:00.000Z'
+  });
+  db.nextAuthAccountId = 2;
+  const app = createApp({
+    db,
+    authAccounts: [{ username: 'admin', password: 'admin123', role: 'admin' }]
+  });
+
+  await withServer(app, async (baseUrl) => {
+    await loginAs(baseUrl, 'legacy-student', 'student123');
+
+    assert.equal(db.authAccounts[0].password, '');
+    assert.match(db.authAccounts[0].passwordHash, /^pbkdf2_sha256\$/);
+    assert.ok(db.authAccounts[0].passwordUpdatedAt);
+  });
+});
+
 test('invalid logins are rejected and business apis require a session', async () => {
   const app = createApp({ db: createDatabase() });
   app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
@@ -882,13 +908,13 @@ test('database saves with schema version, backup, and explicit damaged file erro
   }));
 
   const db = createDatabase({ filePath });
-  assert.equal(db.schemaVersion, 2);
+  assert.equal(db.schemaVersion, 3);
   assert.equal(db.students[0].status, 'active');
 
   db.save();
   const saved = JSON.parse(fs.readFileSync(filePath, 'utf8'));
 
-  assert.equal(saved.schemaVersion, 2);
+  assert.equal(saved.schemaVersion, 3);
   assert.equal(fs.existsSync(`${filePath}.tmp`), false);
   assert.equal(fs.existsSync(`${filePath}.bak`), true);
 
@@ -930,6 +956,15 @@ test('student import preview validates rows and commit creates valid students', 
     assert.deepEqual(preview.rows[1].errors, ['姓名不能为空']);
     assert.deepEqual(preview.rows[2].errors, ['手机号重复']);
 
+    const mixedCommit = await fetch(`${baseUrl}/api/students/import/commit`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({ text: importText })
+    }).then((response) => response.json());
+    assert.equal(mixedCommit.created.length, 1);
+    assert.equal(mixedCommit.invalidCount, 2);
+    assert.equal(app.listStudents().total, 1);
+
     const commit = await fetch(`${baseUrl}/api/students/import/commit`, {
       method: 'POST',
       headers: jsonHeaders(cookie),
@@ -937,7 +972,7 @@ test('student import preview validates rows and commit creates valid students', 
     }).then((response) => response.json());
 
     assert.equal(commit.created.length, 2);
-    assert.equal(app.listStudents().total, 2);
+    assert.equal(app.listStudents().total, 3);
   });
 });
 
@@ -975,7 +1010,18 @@ test('student import template and commit can generate bound student accounts', a
     assert.equal(commit.accounts.length, 1);
     assert.equal(commit.accounts[0].username, '13800000001');
     assert.equal(commit.accounts[0].studentId, commit.created[0].id);
-    assert.ok(commit.accounts[0].password.length >= 8);
+    assert.ok(commit.accounts[0].initialPassword.length >= 8);
+    const generatedStudents = app.listStudents({ accountStatus: 'generated' });
+    const missingStudents = app.listStudents({ accountStatus: 'missing' });
+    const accountExport = app.exportStudentAccounts();
+    assert.equal(generatedStudents.total, 1);
+    assert.equal(generatedStudents.items[0].accountUsername, '13800000001');
+    assert.equal(generatedStudents.items[0].password, undefined);
+    assert.equal(generatedStudents.items[0].passwordHash, undefined);
+    assert.equal(missingStudents.total, 0);
+    assert.equal(accountExport.includes(commit.accounts[0].initialPassword), false);
+    assert.equal(accountExport.includes('初始密码'), false);
+    assert.equal(accountExport.includes('账号状态'), true);
 
     const students = await fetch(`${baseUrl}/api/students`, {
       headers: { cookie }
@@ -983,7 +1029,7 @@ test('student import template and commit can generate bound student accounts', a
     assert.equal(students.items[0].hasAccount, true);
     assert.equal(students.items[0].accountUsername, '13800000001');
 
-    const studentCookie = await loginAs(baseUrl, commit.accounts[0].username, commit.accounts[0].password);
+    const studentCookie = await loginAs(baseUrl, commit.accounts[0].username, commit.accounts[0].initialPassword);
     const workspace = await fetch(`${baseUrl}/api/student-workspace`, {
       headers: { cookie: studentCookie }
     }).then((response) => response.json());
@@ -991,7 +1037,7 @@ test('student import template and commit can generate bound student accounts', a
   });
 });
 
-test('student account generation skips existing accounts and exports credentials', async () => {
+test('student account generation skips existing accounts and exports account status', async () => {
   const app = createApp({
     db: createDatabase(),
     authAccounts: [
@@ -1011,6 +1057,8 @@ test('student account generation skips existing accounts and exports credentials
     }).then((response) => response.json());
     assert.equal(first.accounts.length, 1);
     assert.equal(first.skippedCount, 0);
+    assert.ok(first.accounts[0].initialPassword.length >= 8);
+    assert.equal(first.accounts[0].password, undefined);
 
     const second = await fetch(`${baseUrl}/api/students/accounts/generate`, {
       method: 'POST',
@@ -1020,6 +1068,19 @@ test('student account generation skips existing accounts and exports credentials
     assert.equal(second.accounts.length, 1);
     assert.equal(second.accounts[0].studentId, bob.id);
     assert.equal(second.skippedCount, 1);
+    assert.ok(second.accounts[0].initialPassword.length >= 8);
+
+    const reset = await fetch(`${baseUrl}/api/students/accounts/reset`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({ studentIds: [bob.id] })
+    }).then((response) => response.json());
+    assert.equal(reset.accounts.length, 1);
+    assert.equal(reset.accounts[0].studentId, bob.id);
+    assert.ok(reset.accounts[0].initialPassword.length >= 8);
+    assert.notEqual(reset.accounts[0].initialPassword, second.accounts[0].initialPassword);
+
+    await loginAs(baseUrl, reset.accounts[0].username, reset.accounts[0].initialPassword);
 
     const exportBody = await fetch(`${baseUrl}/api/export/student-accounts`, {
       headers: { cookie }
@@ -1027,9 +1088,11 @@ test('student account generation skips existing accounts and exports credentials
     const exportBuffer = Buffer.from(exportBody);
     const exportCsv = exportBuffer.toString('utf8');
     assert.deepEqual([...exportBuffer.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
-    assert.match(exportCsv, /学生姓名,班级\/课程,手机号,用户名,初始密码/);
-    assert.match(exportCsv, /Alice,前端1班,13800000001,13800000001,/);
-    assert.match(exportCsv, /Bob,前端1班,13800000002,13800000002,/);
+    assert.match(exportCsv, /学生姓名,班级\/课程,手机号,用户名,账号状态,创建时间/);
+    assert.match(exportCsv, /Alice,前端1班,13800000001,13800000001,正常,/);
+    assert.match(exportCsv, /Bob,前端1班,13800000002,13800000002,正常,/);
+    assert.doesNotMatch(exportCsv, new RegExp(first.accounts[0].initialPassword));
+    assert.doesNotMatch(exportCsv, new RegExp(reset.accounts[0].initialPassword));
   });
 });
 
@@ -1053,11 +1116,17 @@ test('student account management endpoints are admin only', async () => {
       headers: jsonHeaders(teacherCookie),
       body: JSON.stringify({ studentIds: [1] })
     });
+    const teacherReset = await fetch(`${baseUrl}/api/students/accounts/reset`, {
+      method: 'POST',
+      headers: jsonHeaders(teacherCookie),
+      body: JSON.stringify({ studentIds: [1] })
+    });
     const studentExport = await fetch(`${baseUrl}/api/export/student-accounts`, {
       headers: { cookie: studentCookie }
     });
 
     assert.equal(teacherGenerate.status, 403);
+    assert.equal(teacherReset.status, 403);
     assert.equal(studentExport.status, 403);
   });
 });

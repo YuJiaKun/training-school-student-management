@@ -1,6 +1,9 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { toCsvWithBom } = require('./lib/csv');
+const { generateInitialPassword, hashPassword, verifyPassword } = require('./lib/passwords');
+const { createZip } = require('./lib/zip');
 
 const DEFAULT_SESSION_MAX_AGE_SECONDS = 60 * 60 * 8;
 const DEFAULT_AUTH_ACCOUNTS = [
@@ -32,7 +35,9 @@ function createAppWithOptions({
   const sessions = new Map();
   const loginFailures = new Map();
   const baseAuthAccounts = normalizeAuthAccounts(authAccounts);
-  if (!Array.isArray(db.authAccounts)) db.authAccounts = [];
+  db.authAccounts = Array.isArray(db.authAccounts) && db.authAccounts.length
+    ? normalizeAuthAccounts(db.authAccounts)
+    : [];
   if (!Number.isInteger(db.nextAuthAccountId)) db.nextAuthAccountId = nextRuntimeId(db.authAccounts);
   const teacherDirectory = normalizeTeachers(teachers);
   const sessionMaxAgeMs = Number(sessionMaxAgeSeconds || DEFAULT_SESSION_MAX_AGE_SECONDS) * 1000;
@@ -86,6 +91,11 @@ function createAppWithOptions({
           if (!text.includes(filters.keyword)) return false;
         }
         if (filters.className && student.className !== filters.className) return false;
+        if (filters.accountStatus) {
+          const hasAccount = Boolean(findStudentAccount(accountDirectory, student.id));
+          if (filters.accountStatus === 'generated' && !hasAccount) return false;
+          if (filters.accountStatus === 'missing' && hasAccount) return false;
+        }
         return true;
       }).map((student) => withStudentAccountInfo(student, accountDirectory));
       const start = (page - 1) * pageSize;
@@ -103,16 +113,33 @@ function createAppWithOptions({
 
     importStudents(input = {}) {
       const preview = this.previewStudentImport(input);
-      if (preview.invalidCount > 0) {
+      if (preview.validCount === 0) {
         const error = new Error('student import contains invalid rows');
         error.preview = preview;
         throw error;
       }
-      const created = preview.rows.map((row) => this.createStudent(row.student));
+      const created = preview.rows
+        .filter((row) => row.errors.length === 0)
+        .map((row) => this.createStudent(row.student));
       const accountResult = input.generateAccounts
         ? this.generateStudentAccounts({ studentIds: created.map((student) => student.id) })
         : { accounts: [], skipped: [], skippedCount: 0 };
       return { ...preview, created, ...accountResult };
+    },
+
+    exportInvalidStudentImportRows(input = {}) {
+      const preview = this.previewStudentImport(input);
+      const rows = [['行号', '姓名', '手机号', '班级/课程', '错误原因']];
+      for (const row of preview.rows.filter((item) => item.errors.length > 0)) {
+        rows.push([
+          row.rowNumber,
+          row.student.name,
+          row.student.phone,
+          row.student.className,
+          row.errors.join('；')
+        ]);
+      }
+      return toCsvWithBom(rows);
     },
 
     generateStudentAccounts(input = {}) {
@@ -133,18 +160,44 @@ function createAppWithOptions({
         const username = uniqueStudentUsername(student, usedUsernames);
         usedUsernames.add(username);
         existingStudentIds.add(Number(student.id));
+        const initialPassword = generateInitialPassword();
         const account = {
           id: db.nextAuthAccountId++,
           username,
-          password: generateInitialPassword(),
+          password: '',
+          passwordHash: hashPassword(initialPassword),
           role: 'student',
           studentId: student.id,
           teacherId: null,
           status: 'active',
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          passwordUpdatedAt: new Date().toISOString()
         };
         db.authAccounts.push(account);
-        accounts.push(publicStudentAccount(db, account));
+        accounts.push(publicStudentAccount(db, account, { initialPassword }));
+      }
+
+      return { accounts, skipped, skippedCount: skipped.length };
+    },
+
+    resetStudentAccountPasswords(input = {}) {
+      const students = resolveAccountGenerationStudents(db, input);
+      const accountDirectory = listAllAuthAccounts(baseAuthAccounts, db);
+      const accounts = [];
+      const skipped = [];
+
+      for (const student of students) {
+        const account = findStudentAccount(accountDirectory, student.id);
+        if (!account) {
+          skipped.push({ studentId: student.id, reason: '未生成账号' });
+          continue;
+        }
+
+        const initialPassword = generateInitialPassword();
+        account.password = '';
+        account.passwordHash = hashPassword(initialPassword);
+        account.passwordUpdatedAt = new Date().toISOString();
+        accounts.push(publicStudentAccount(db, account, { initialPassword }));
       }
 
       return { accounts, skipped, skippedCount: skipped.length };
@@ -556,9 +609,12 @@ function createAppWithOptions({
       const normalizedUsername = String(username || '').trim();
       assertLoginAllowed(loginFailures, normalizedUsername);
       const account = listAllAuthAccounts(baseAuthAccounts, db).find((item) => item.username === normalizedUsername);
-      if (!account || account.password !== password) {
+      if (!account || !verifyAccountPassword(account, password)) {
         recordLoginFailure(loginFailures, normalizedUsername);
         throw new Error('invalid credentials');
+      }
+      if (upgradeLegacyAccountPassword(account, password)) {
+        db.save();
       }
       loginFailures.delete(normalizedUsername);
       const token = crypto.randomUUID();
@@ -604,11 +660,11 @@ function createAppWithOptions({
     exportStudentAccounts(filters = {}) {
       const students = this.listStudents(filters).items;
       const accountDirectory = listAllAuthAccounts(baseAuthAccounts, db);
-      const rows = [['学生姓名', '班级/课程', '手机号', '用户名', '初始密码']];
+      const rows = [['学生姓名', '班级/课程', '手机号', '用户名', '账号状态', '创建时间']];
       for (const student of students) {
         const account = findStudentAccount(accountDirectory, student.id);
         if (!account) continue;
-        rows.push([student.name, student.className, student.phone, account.username, account.password]);
+        rows.push([student.name, student.className, student.phone, account.username, accountStatusLabel(account.status), account.createdAt || '']);
       }
       return toCsvWithBom(rows);
     },
@@ -720,9 +776,10 @@ function normalizeAuthAccounts(authAccounts) {
   return authAccounts.map((account) => {
     const username = String(account.username || '').trim();
     const password = String(account.password || '');
+    const passwordHash = String(account.passwordHash || '');
     const role = String(account.role || '').trim();
 
-    if (!username || !password || !VALID_ROLES.has(role)) {
+    if (!username || (!password && !passwordHash) || !VALID_ROLES.has(role)) {
       throw new Error('invalid auth account config');
     }
 
@@ -730,11 +787,13 @@ function normalizeAuthAccounts(authAccounts) {
       id: account.id ? Number(account.id) : null,
       username,
       password,
+      passwordHash,
       role,
       teacherId: account.teacherId ? Number(account.teacherId) : null,
       studentId: account.studentId ? Number(account.studentId) : null,
       status: account.status || 'active',
-      createdAt: account.createdAt || ''
+      createdAt: account.createdAt || '',
+      passwordUpdatedAt: account.passwordUpdatedAt || ''
     };
   });
 }
@@ -743,7 +802,7 @@ function listAllAuthAccounts(baseAuthAccounts, db) {
   const storedAccounts = Array.isArray(db.authAccounts) ? db.authAccounts : [];
   return [
     ...baseAuthAccounts,
-    ...(storedAccounts.length ? normalizeAuthAccounts(storedAccounts) : [])
+    ...storedAccounts
   ].filter((account) => account.status !== 'disabled');
 }
 
@@ -798,16 +857,11 @@ function uniqueStudentUsername(student, usedUsernames) {
   return username;
 }
 
-function generateInitialPassword() {
-  return crypto.randomBytes(4).toString('hex');
-}
-
-function publicStudentAccount(db, account) {
+function publicStudentAccount(db, account, options = {}) {
   const student = db.students.find((item) => Number(item.id) === Number(account.studentId));
-  return {
+  const payload = {
     id: account.id,
     username: account.username,
-    password: account.password,
     role: account.role,
     studentId: account.studentId,
     studentName: student?.name || '',
@@ -815,6 +869,28 @@ function publicStudentAccount(db, account) {
     className: student?.className || '',
     createdAt: account.createdAt || ''
   };
+  if (options.initialPassword) payload.initialPassword = options.initialPassword;
+  return payload;
+}
+
+function verifyAccountPassword(account, password) {
+  if (account.passwordHash) {
+    return verifyPassword(password, account.passwordHash);
+  }
+  return Boolean(account.password) && account.password === String(password || '');
+}
+
+function upgradeLegacyAccountPassword(account, password) {
+  if (account.passwordHash || !account.password) return false;
+  account.passwordHash = hashPassword(password);
+  account.password = '';
+  account.passwordUpdatedAt = new Date().toISOString();
+  return true;
+}
+
+function accountStatusLabel(status) {
+  if (status === 'disabled') return '已停用';
+  return '正常';
 }
 
 function defaultUploadRoot(db) {
@@ -1040,91 +1116,6 @@ function statusLabel(status) {
   return labels[status] || status || '';
 }
 
-function createZip(entries) {
-  const localParts = [];
-  const centralParts = [];
-  let offset = 0;
-  const { time, date } = dosDateTime(new Date());
-
-  for (const entry of entries) {
-    const name = Buffer.from(entry.name, 'utf8');
-    const data = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data || '');
-    const crc = crc32(data);
-    const localHeader = Buffer.alloc(30);
-    localHeader.writeUInt32LE(0x04034b50, 0);
-    localHeader.writeUInt16LE(20, 4);
-    localHeader.writeUInt16LE(0x0800, 6);
-    localHeader.writeUInt16LE(0, 8);
-    localHeader.writeUInt16LE(time, 10);
-    localHeader.writeUInt16LE(date, 12);
-    localHeader.writeUInt32LE(crc, 14);
-    localHeader.writeUInt32LE(data.length, 18);
-    localHeader.writeUInt32LE(data.length, 22);
-    localHeader.writeUInt16LE(name.length, 26);
-    localHeader.writeUInt16LE(0, 28);
-    localParts.push(localHeader, name, data);
-
-    const centralHeader = Buffer.alloc(46);
-    centralHeader.writeUInt32LE(0x02014b50, 0);
-    centralHeader.writeUInt16LE(20, 4);
-    centralHeader.writeUInt16LE(20, 6);
-    centralHeader.writeUInt16LE(0x0800, 8);
-    centralHeader.writeUInt16LE(0, 10);
-    centralHeader.writeUInt16LE(time, 12);
-    centralHeader.writeUInt16LE(date, 14);
-    centralHeader.writeUInt32LE(crc, 16);
-    centralHeader.writeUInt32LE(data.length, 20);
-    centralHeader.writeUInt32LE(data.length, 24);
-    centralHeader.writeUInt16LE(name.length, 28);
-    centralHeader.writeUInt16LE(0, 30);
-    centralHeader.writeUInt16LE(0, 32);
-    centralHeader.writeUInt16LE(0, 34);
-    centralHeader.writeUInt16LE(0, 36);
-    centralHeader.writeUInt32LE(0, 38);
-    centralHeader.writeUInt32LE(offset, 42);
-    centralParts.push(centralHeader, name);
-
-    offset += localHeader.length + name.length + data.length;
-  }
-
-  const centralDirectory = Buffer.concat(centralParts);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(0, 4);
-  end.writeUInt16LE(0, 6);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(centralDirectory.length, 12);
-  end.writeUInt32LE(offset, 16);
-  end.writeUInt16LE(0, 20);
-
-  return Buffer.concat([...localParts, centralDirectory, end]);
-}
-
-function dosDateTime(dateValue) {
-  const year = Math.max(dateValue.getFullYear(), 1980);
-  return {
-    time: (dateValue.getHours() << 11) | (dateValue.getMinutes() << 5) | Math.floor(dateValue.getSeconds() / 2),
-    date: ((year - 1980) << 9) | ((dateValue.getMonth() + 1) << 5) | dateValue.getDate()
-  };
-}
-
-function crc32(buffer) {
-  let crc = 0xffffffff;
-  for (const byte of buffer) {
-    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-const CRC32_TABLE = Array.from({ length: 256 }, (_, index) => {
-  let value = index;
-  for (let bit = 0; bit < 8; bit += 1) {
-    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
-  }
-  return value >>> 0;
-});
-
 function confirmInterviewSchedule(db, id, input, confirmedByRole) {
   const schedule = db.interviewSchedules.find((item) => item.id === id);
   if (!schedule) throw new Error('schedule not found');
@@ -1178,22 +1169,6 @@ function buildWeek(weekStart) {
     date.setDate(start.getDate() + index);
     return date.toISOString().slice(0, 10);
   });
-}
-
-function toCsv(rows) {
-  return rows.map((row) => row.map(csvCell).join(',')).join('\n');
-}
-
-function toCsvWithBom(rows) {
-  return `\ufeff${toCsv(rows)}`;
-}
-
-function csvCell(value) {
-  const text = String(value ?? '');
-  if (/[",\n]/.test(text)) {
-    return `"${text.replaceAll('"', '""')}"`;
-  }
-  return text;
 }
 
 function requireExistingStudent(db, value) {

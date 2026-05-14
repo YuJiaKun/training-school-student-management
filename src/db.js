@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 
 function createDatabase(options = {}) {
   const filePath = options.filePath || null;
@@ -161,11 +161,13 @@ function normalizeAuthAccounts(accounts) {
     id: Number(account.id),
     username: account.username || '',
     password: account.password || '',
+    passwordHash: account.passwordHash || '',
     role: account.role || 'student',
     studentId: account.studentId ? Number(account.studentId) : null,
     teacherId: account.teacherId ? Number(account.teacherId) : null,
     status: account.status || 'active',
-    createdAt: account.createdAt || ''
+    createdAt: account.createdAt || '',
+    passwordUpdatedAt: account.passwordUpdatedAt || ''
   })).filter((account) => Number.isInteger(account.id) && account.id > 0);
 }
 

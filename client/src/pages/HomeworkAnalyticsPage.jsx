@@ -275,24 +275,27 @@ function StudentRiskPanel({ students }) {
           <p>优先显示完成率最低的学生</p>
         </div>
       </div>
-      {!students.length ? <EmptyState text="暂无学生作业记录" compact /> : null}
-      <div className="risk-list">
-        {students.map((student) => (
-          <div className="risk-item" key={student.studentId}>
-            <div className="risk-main">
-              <strong>{student.studentName || `学生 #${student.studentId}`}</strong>
-              <span>{student.className || '-'} / 已交 {student.submittedCount}/{student.assignedCount}</span>
+      {!students.length ? (
+        <EmptyState text="暂无学生作业记录" compact />
+      ) : (
+        <div className="risk-list">
+          {students.map((student) => (
+            <div className="risk-item" key={student.studentId}>
+              <div className="risk-main">
+                <strong>{student.studentName || `学生 #${student.studentId}`}</strong>
+                <span>{student.className || '-'} / 已交 {student.submittedCount}/{student.assignedCount}</span>
+              </div>
+              <div className="risk-score">
+                <b>{percent(student.completionRate)}</b>
+                <small>{formatDateTime(student.latestSubmitAt)}</small>
+              </div>
+              <div className="risk-progress" style={progressStyle(student.completionRate)}>
+                <span />
+              </div>
             </div>
-            <div className="risk-score">
-              <b>{percent(student.completionRate)}</b>
-              <small>{formatDateTime(student.latestSubmitAt)}</small>
-            </div>
-            <div className="risk-progress" style={progressStyle(student.completionRate)}>
-              <span />
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </article>
   );
 }
@@ -312,19 +315,23 @@ function LatestMissingPanel({ latestAssignment, students }) {
           </button>
         ) : null}
       </div>
-      {!latestAssignment ? <EmptyState text="暂无作业任务" compact /> : null}
-      {latestAssignment && !students.length ? <EmptyState text="最新作业已全部提交" compact tone="success" /> : null}
-      <div className="missing-list">
-        {students.slice(0, 12).map((student) => (
-          <div className="missing-item" key={student.studentId}>
-            <div>
-              <strong>{student.studentName || `学生 #${student.studentId}`}</strong>
-              <span>{student.className || '-'} / {student.studentPhone || '-'}</span>
+      {!latestAssignment ? (
+        <EmptyState text="暂无作业任务" compact />
+      ) : !students.length ? (
+        <EmptyState text="最新作业已全部提交" compact tone="success" />
+      ) : (
+        <div className="missing-list">
+          {students.slice(0, 12).map((student) => (
+            <div className="missing-item" key={student.studentId}>
+              <div>
+                <strong>{student.studentName || `学生 #${student.studentId}`}</strong>
+                <span>{student.className || '-'} / {student.studentPhone || '-'}</span>
+              </div>
+              <span className="missing-tag">未交</span>
             </div>
-            <span className="missing-tag">未交</span>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </article>
   );
 }

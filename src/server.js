@@ -153,6 +153,12 @@ function createServerApp({
             return;
           }
 
+          if (req.method === 'POST' && url.pathname === '/api/students/accounts/reset') {
+            if (!authorize(res, session, ['admin'])) return;
+            await mutateJson(req, res, 200, (body) => app.resetStudentAccountPasswords(body), app, bodyOptions);
+            return;
+          }
+
           if (req.method === 'POST' && url.pathname === '/api/students') {
             if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 201, (body) => ({ student: app.createStudent(body) }), app, bodyOptions);
@@ -544,6 +550,7 @@ function errorPayload(error) {
 function readStudentFilters(url) {
   return {
     status: url.searchParams.get('status') || undefined,
+    accountStatus: url.searchParams.get('accountStatus') || undefined,
     keyword: url.searchParams.get('keyword') || undefined,
     className: url.searchParams.get('className') || undefined,
     page: url.searchParams.get('page') || undefined,
@@ -821,7 +828,7 @@ function currentWeekStart() {
 if (require.main === module) {
   let server;
   try {
-    const port = Number(process.env.PORT || 3000);
+    const port = Number(process.env.PORT || 4000);
     const filePath = process.env.DATA_FILE || './data/data.json';
     const sessionMaxAgeSeconds = Number(process.env.SESSION_MAX_AGE_SECONDS || DEFAULT_SESSION_MAX_AGE_SECONDS);
     const db = createDatabase({ filePath });
@@ -847,7 +854,7 @@ if (require.main === module) {
 
     server.on('error', (error) => {
       if (error.code === 'EADDRINUSE') {
-        console.error(`端口 ${port} 已被占用，请设置 PORT 使用其他端口，例如：PORT=3001 npm start`);
+        console.error(`端口 ${port} 已被占用。学生管理系统建议使用 PORT=4000；不要使用 3000（老网站）或 3001（Gitea）。`);
       } else {
         console.error(`启动失败：${error.message}`);
       }

@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
-import AdminDashboard from '../pages/AdminDashboard.jsx';
-import AdminScheduleQueue from '../pages/AdminScheduleQueue.jsx';
-import HomeworkAnalyticsPage from '../pages/HomeworkAnalyticsPage.jsx';
-import HomeworkPage from '../pages/HomeworkPage.jsx';
-import InterviewsPage from '../pages/InterviewsPage.jsx';
-import SchedulesPage from '../pages/SchedulesPage.jsx';
-import StudentWorkspace from '../pages/StudentWorkspace.jsx';
-import StudentsPage from '../pages/StudentsPage.jsx';
-import TeacherWorkspace from '../pages/TeacherWorkspace.jsx';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import StatusBadge from './StatusBadge.jsx';
+
+const AdminDashboard = lazy(() => import('../pages/AdminDashboard.jsx'));
+const AdminScheduleQueue = lazy(() => import('../pages/AdminScheduleQueue.jsx'));
+const HomeworkAnalyticsPage = lazy(() => import('../pages/HomeworkAnalyticsPage.jsx'));
+const HomeworkPage = lazy(() => import('../pages/HomeworkPage.jsx'));
+const InterviewsPage = lazy(() => import('../pages/InterviewsPage.jsx'));
+const SchedulesPage = lazy(() => import('../pages/SchedulesPage.jsx'));
+const StudentWorkspace = lazy(() => import('../pages/StudentWorkspace.jsx'));
+const StudentsPage = lazy(() => import('../pages/StudentsPage.jsx'));
+const TeacherWorkspace = lazy(() => import('../pages/TeacherWorkspace.jsx'));
 
 export const ROLE_TEXT = {
   admin: '管理员',
@@ -75,7 +76,9 @@ export default function AppShell({ user, onLogout }) {
         </header>
 
         <main className="main-content">
-          <RouteView route={activeRoute} user={user} />
+          <Suspense fallback={<div className="empty-state">正在加载页面...</div>}>
+            <RouteView route={activeRoute} user={user} />
+          </Suspense>
         </main>
       </div>
     </div>

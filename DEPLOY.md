@@ -59,7 +59,7 @@ sudo nano /etc/training-school-student-management.env
 重点检查这些配置：
 
 - `NODE_ENV=production`：生产环境标识。
-- `PORT=3000`：Node 服务监听端口，需要和 Nginx 反代目标一致。
+- `PORT=4000`：Node 服务监听端口，需要和 Nginx 反代目标一致。当前学生管理系统使用 4000，避免占用老网站 3000 和 Gitea 3001。
 - `DATA_FILE=/var/lib/training-school-student-management/data.json`：业务数据文件路径。
 - `AUTH_ACCOUNTS=...`：登录账号 JSON 数组，上线前必须替换示例密码。
 - `COOKIE_SECURE=true`：启用 HTTPS 后建议保持为 `true`。
@@ -105,14 +105,14 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-样例会把整站代理到 `http://127.0.0.1:3000`，并保留 `/health`、WebSocket 升级头和常用代理头。HTTPS 证书路径使用 `example.com` 占位，请替换为实际证书路径。
+样例会把整站代理到 `http://127.0.0.1:4000`，并保留 `/health`、WebSocket 升级头和常用代理头。HTTPS 证书路径使用 `example.com` 占位，请替换为实际证书路径。
 
 ## 7. 健康检查
 
 在服务器本机检查 Node 服务：
 
 ```bash
-curl -i http://127.0.0.1:3000/health
+curl -i http://127.0.0.1:4000/health
 ```
 
 通过 Nginx 检查外部访问：
@@ -151,7 +151,7 @@ sudo systemctl start training-school-student-management
 
 ```bash
 sudo journalctl -u training-school-student-management -n 80 --no-pager
-curl -i http://127.0.0.1:3000/health
+curl -i http://127.0.0.1:4000/health
 ```
 
 ## 9. 发布更新和回滚
@@ -187,7 +187,7 @@ sudo systemctl restart training-school-student-management
 - `AUTH_ACCOUNTS` 未保留 `admin123`、`teacher123`、`student123` 或 `change-me-*` 示例密码。
 - `DATA_FILE` 所在目录归属为 `training-school:training-school`，服务用户可写。
 - `systemctl status training-school-student-management` 显示服务正在运行。
-- `curl http://127.0.0.1:3000/health` 返回 `{"status":"ok"}`。
+- `curl http://127.0.0.1:4000/health` 返回 `{"status":"ok"}`。
 - `nginx -t` 通过，Nginx 已 reload。
 - `https://example.com/health` 返回 `{"status":"ok"}`。
 - 浏览器可打开站点首页，并能完成登录、查看列表、新增记录等核心流程。

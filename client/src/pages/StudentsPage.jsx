@@ -13,11 +13,58 @@ const emptyForm = {
   remark: ''
 };
 
+function downloadRecentAccounts(accounts) {
+  const rows = [
+    ['学生姓名', '班级/课程', '手机号', '用户名', '初始密码'],
+    ...accounts.map((account) => [
+      account.studentName || `学生 #${account.studentId}`,
+      account.className || '',
+      account.studentPhone || '',
+      account.username || '',
+      account.initialPassword || ''
+    ])
+  ];
+  downloadCsv('本次学生账号清单.csv', rows);
+}
+
+function downloadInvalidImportRows(preview) {
+  const rows = [
+    ['行号', '姓名', '手机号', '班级/课程', '错误原因'],
+    ...(preview?.rows || [])
+      .filter((row) => row.errors?.length)
+      .map((row) => [
+        row.rowNumber,
+        row.student?.name || '',
+        row.student?.phone || '',
+        row.student?.className || '',
+        row.errors.join('；')
+      ])
+  ];
+  downloadCsv('学生导入错误行.csv', rows);
+}
+
+function downloadCsv(fileName, rows) {
+  const csv = `\ufeff${rows.map((row) => row.map(csvCell).join(',')).join('\n')}`;
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function csvCell(value) {
+  const text = String(value ?? '');
+  if (/[",\n]/.test(text)) return `"${text.replaceAll('"', '""')}"`;
+  return text;
+}
+
 export default function StudentsPage() {
   const [students, setStudents] = useState([]);
   const [total, setTotal] = useState(0);
   const [keyword, setKeyword] = useState('');
   const [status, setStatus] = useState('');
+  const [accountStatus, setAccountStatus] = useState('');
   const [form, setForm] = useState(emptyForm);
   const [importText, setImportText] = useState('');
   const [importFileName, setImportFileName] = useState('');
@@ -29,9 +76,10 @@ export default function StudentsPage() {
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [generatingAccounts, setGeneratingAccounts] = useState(false);
+  const [resettingAccountId, setResettingAccountId] = useState(null);
   const [error, setError] = useState('');
 
-  const filters = useMemo(() => ({ keyword, status }), [keyword, status]);
+  const filters = useMemo(() => ({ keyword, status, accountStatus }), [accountStatus, keyword, status]);
   const exportUrl = buildPath('/api/export/students', filters);
   const accountExportUrl = buildPath('/api/export/student-accounts', filters);
 
@@ -119,9 +167,12 @@ export default function StudentsPage() {
       const accountText = generateAccounts
         ? `，生成 ${result.accounts?.length || 0} 个账号，跳过 ${result.skippedCount || 0} 名已有账号学生`
         : '';
-      setImportMessage(`已导入 ${result.created?.length || 0} 名学生${accountText}`);
-      setImportText('');
-      setImportFileName('');
+      const invalidText = result.invalidCount ? `，另有 ${result.invalidCount} 条未导入需修正` : '';
+      setImportMessage(`已导入 ${result.created?.length || 0} 名学生${accountText}${invalidText}`);
+      if (!result.invalidCount) {
+        setImportText('');
+        setImportFileName('');
+      }
       await loadStudents();
     } catch (err) {
       setError(err.message || '导入学生失败');
@@ -164,6 +215,23 @@ export default function StudentsPage() {
     }
   }
 
+  async function resetStudentPassword(student) {
+    setError('');
+    setImportMessage('');
+    setGeneratedAccounts([]);
+    setResettingAccountId(student.id);
+    try {
+      const result = await apiPost('/api/students/accounts/reset', { studentIds: [student.id] });
+      setGeneratedAccounts(result.accounts || []);
+      setImportMessage(`已重置 ${result.accounts?.length || 0} 个账号密码，跳过 ${result.skippedCount || 0} 名学生`);
+      await loadStudents();
+    } catch (err) {
+      setError(err.message || '重置账号密码失败');
+    } finally {
+      setResettingAccountId(null);
+    }
+  }
+
   async function archiveStudent(student) {
     setError('');
     try {
@@ -195,6 +263,11 @@ export default function StudentsPage() {
           <option value="">全部状态</option>
           <option value="active">在读</option>
           <option value="archived">已归档</option>
+        </select>
+        <select value={accountStatus} onChange={(event) => setAccountStatus(event.target.value)}>
+          <option value="">全部账号</option>
+          <option value="missing">仅看未生成账号</option>
+          <option value="generated">仅看已生成账号</option>
         </select>
         <button type="button" onClick={generateAccountsForCurrentStudents} disabled={generatingAccounts || loading || !students.length}>
           {generatingAccounts ? '正在生成账号...' : '批量生成账号'}
@@ -241,10 +314,15 @@ export default function StudentsPage() {
             className="button button-primary"
             type="button"
             onClick={commitImport}
-            disabled={importing || !importPreview || importPreview.invalidCount > 0 || importPreview.validCount === 0}
+            disabled={importing || !importPreview || importPreview.validCount === 0}
           >
             确认导入
           </button>
+          {importPreview?.invalidCount ? (
+            <button className="button button-secondary" type="button" onClick={() => downloadInvalidImportRows(importPreview)}>
+              下载错误行
+            </button>
+          ) : null}
           {importPreview ? (
             <span className="muted">可导入 {importPreview.validCount} 条，需修正 {importPreview.invalidCount} 条</span>
           ) : null}
@@ -264,15 +342,17 @@ export default function StudentsPage() {
             <div className="panel-header">
               <div>
                 <h3>最近生成账号</h3>
-                <p className="muted">已生成 {generatedAccounts.length} 个账号，可导出账号清单保存。</p>
+                <p className="muted">已生成 {generatedAccounts.length} 个账号，初始密码仅在本次操作后展示。</p>
               </div>
-              <a className="button button-secondary" href={accountExportUrl}>导出账号清单</a>
+              <button className="button button-secondary" type="button" onClick={() => downloadRecentAccounts(generatedAccounts)}>
+                下载本次账号清单
+              </button>
             </div>
             <div className="account-chip-list">
               {generatedAccounts.slice(0, 6).map((account) => (
                 <div className="account-chip" key={account.id || `${account.studentId}-${account.username}`}>
                   <strong>{account.studentName || `学生 #${account.studentId}`}</strong>
-                  <span>{account.username} / {account.password}</span>
+                  <span>{account.username} / {account.initialPassword || '-'}</span>
                 </div>
               ))}
             </div>
@@ -327,6 +407,11 @@ export default function StudentsPage() {
                 <td>{student.remark || '-'}</td>
                 <td className="table-actions">
                   <button type="button" onClick={() => startEdit(student)}>编辑</button>
+                  {student.hasAccount ? (
+                    <button type="button" onClick={() => resetStudentPassword(student)} disabled={resettingAccountId === student.id}>
+                      {resettingAccountId === student.id ? '重置中...' : '重置密码'}
+                    </button>
+                  ) : null}
                   {student.status !== 'archived' ? <button type="button" onClick={() => archiveStudent(student)}>归档</button> : null}
                 </td>
               </tr>

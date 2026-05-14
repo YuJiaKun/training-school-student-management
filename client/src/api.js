@@ -28,7 +28,7 @@ const ERROR_TEXT_MAP = {
   'request body too large': '请求内容过大，请减少备注内容后再试',
   'unsupported content type': '请求格式不支持',
   'too many login attempts': '登录失败次数过多，请稍后再试',
-  'student import contains invalid rows': '导入内容存在错误，请先根据预览修正'
+  'student import contains invalid rows': '导入内容没有可导入行，请先根据预览修正'
 };
 
 async function request(method, path, body) {
