@@ -15,16 +15,19 @@ const MIME_TYPES = {
   '.webp': 'image/webp'
 };
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 function createServerApp({
   app,
   clientDistPath = DEFAULT_CLIENT_DIST,
   cookieSecure = false,
   sessionMaxAgeSeconds = DEFAULT_SESSION_MAX_AGE_SECONDS,
-  maxBodyBytes = DEFAULT_MAX_BODY_BYTES
+  maxBodyBytes = DEFAULT_MAX_BODY_BYTES,
+  maxUploadBytes = DEFAULT_MAX_UPLOAD_BYTES
 }) {
   const cookieOptions = { secure: cookieSecure, maxAgeSeconds: sessionMaxAgeSeconds };
   const bodyOptions = { maxBytes: maxBodyBytes };
+  const uploadBodyOptions = { maxBytes: maxUploadBytes };
 
   return {
     renderClientShell() {
@@ -92,6 +95,12 @@ function createServerApp({
             return;
           }
 
+          if (req.method === 'GET' && url.pathname === '/api/classes') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            sendJson(res, 200, app.listClasses());
+            return;
+          }
+
           if (req.method === 'GET' && url.pathname === '/api/student-workspace') {
             if (!authorize(res, session, ['student'])) return;
             try {
@@ -105,6 +114,18 @@ function createServerApp({
           if (req.method === 'GET' && url.pathname === '/api/dashboard/stats') {
             if (!authorize(res, session, ['admin'])) return;
             sendJson(res, 200, app.getDashboardStats());
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/homework-analytics') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            sendJson(res, 200, app.getHomeworkAnalytics(readHomeworkAssignmentFilters(url)));
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/students/import/template.csv') {
+            if (!authorize(res, session, ['admin'])) return;
+            sendDownload(res, 200, Buffer.from(app.exportStudentImportTemplate(), 'utf8'), 'text/csv; charset=utf-8', '学生导入模板.csv');
             return;
           }
 
@@ -123,6 +144,12 @@ function createServerApp({
           if (req.method === 'POST' && url.pathname === '/api/students/import/commit') {
             if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 201, (body) => app.importStudents(body), app, bodyOptions);
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/students/accounts/generate') {
+            if (!authorize(res, session, ['admin'])) return;
+            await mutateJson(req, res, 201, (body) => app.generateStudentAccounts(body), app, bodyOptions);
             return;
           }
 
@@ -146,8 +173,20 @@ function createServerApp({
             return;
           }
 
+          if (req.method === 'GET' && url.pathname === '/api/homework-assignments') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            sendJson(res, 200, app.listHomeworkAssignments(readHomeworkAssignmentFilters(url)));
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/homework-assignments') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            await mutateJson(req, res, 201, (body) => app.createHomeworkAssignment(body, session), app, bodyOptions);
+            return;
+          }
+
           if (req.method === 'GET' && url.pathname === '/api/homework') {
-            if (!authorize(res, session, ['admin'])) return;
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
             sendJson(res, 200, app.listHomeworkRecords(readHomeworkFilters(url)));
             return;
           }
@@ -155,6 +194,25 @@ function createServerApp({
           if (req.method === 'POST' && url.pathname === '/api/homework') {
             if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 201, (body) => ({ record: app.addHomeworkRecord(body) }), app, bodyOptions);
+            return;
+          }
+
+          const homeworkSubmissionMatch = url.pathname.match(/^\/api\/homework\/(\d+)\/submission$/);
+          if (homeworkSubmissionMatch && req.method === 'POST') {
+            if (!authorize(res, session, ['student'])) return;
+            await handleHomeworkSubmission(req, res, app, Number(homeworkSubmissionMatch[1]), session, uploadBodyOptions);
+            return;
+          }
+
+          const homeworkFileMatch = url.pathname.match(/^\/api\/homework\/(\d+)\/file$/);
+          if (homeworkFileMatch && req.method === 'GET') {
+            if (!authorize(res, session, ['admin', 'teacher', 'student'])) return;
+            try {
+              const file = app.getHomeworkFile(Number(homeworkFileMatch[1]), session);
+              sendDownload(res, 200, file.body, file.contentType, file.fileName);
+            } catch (error) {
+              sendJson(res, error.statusCode || 400, { error: error.message });
+            }
             return;
           }
 
@@ -258,8 +316,38 @@ function createServerApp({
             return;
           }
 
-          if (req.method === 'GET' && url.pathname === '/api/export/homework') {
+          if (req.method === 'GET' && url.pathname === '/api/export/student-accounts') {
             if (!authorize(res, session, ['admin'])) return;
+            sendText(res, 200, app.exportStudentAccounts(readStudentFilters(url)), 'text/csv; charset=utf-8');
+            return;
+          }
+
+          const homeworkStudentZipMatch = url.pathname.match(/^\/api\/export\/homework\/student\/(\d+)\.zip$/);
+          if (homeworkStudentZipMatch && req.method === 'GET') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            try {
+              const zip = app.exportHomeworkStudentZip(Number(homeworkStudentZipMatch[1]), readHomeworkFilters(url));
+              sendDownload(res, 200, zip.body, zip.contentType, zip.fileName);
+            } catch (error) {
+              sendJson(res, error.statusCode || 400, { error: error.message });
+            }
+            return;
+          }
+
+          const homeworkZipMatch = url.pathname.match(/^\/api\/export\/homework\/(\d+)\.zip$/);
+          if (homeworkZipMatch && req.method === 'GET') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            try {
+              const zip = app.exportHomeworkAssignmentZip(Number(homeworkZipMatch[1]));
+              sendDownload(res, 200, zip.body, zip.contentType, zip.fileName);
+            } catch (error) {
+              sendJson(res, error.statusCode || 400, { error: error.message });
+            }
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/export/homework') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
             sendText(res, 200, app.exportHomeworkRecords(readHomeworkFilters(url)), 'text/csv; charset=utf-8');
             return;
           }
@@ -337,6 +425,24 @@ async function handleJson(req, res, statusCode, handler, bodyOptions) {
     sendJson(res, statusCode, handler(body));
   } catch (error) {
     sendJson(res, error.statusCode || 400, errorPayload(error));
+  }
+}
+
+async function handleHomeworkSubmission(req, res, app, recordId, session, bodyOptions) {
+  try {
+    const form = await readMultipartForm(req, bodyOptions);
+    if (!form.file) throw new Error('homework file is required');
+    const record = app.submitHomeworkFile(recordId, {
+      studentId: session.studentId,
+      fileName: form.file.fileName,
+      contentType: form.file.contentType,
+      content: form.file.content,
+      remark: form.fields.remark || ''
+    });
+    persist(app);
+    sendJson(res, 200, { record });
+  } catch (error) {
+    sendJson(res, error.statusCode || 400, { error: error.message });
   }
 }
 
@@ -445,11 +551,20 @@ function readStudentFilters(url) {
   };
 }
 
+function readHomeworkAssignmentFilters(url) {
+  return {
+    className: url.searchParams.get('className') || undefined,
+    keyword: url.searchParams.get('keyword') || undefined
+  };
+}
+
 function readHomeworkFilters(url) {
   return {
     studentId: url.searchParams.get('studentId') || undefined,
+    assignmentId: url.searchParams.get('assignmentId') || undefined,
     className: url.searchParams.get('className') || undefined,
-    submitStatus: url.searchParams.get('submitStatus') || undefined
+    submitStatus: url.searchParams.get('submitStatus') || undefined,
+    keyword: url.searchParams.get('keyword') || undefined
   };
 }
 
@@ -566,56 +681,128 @@ function clearSessionCookie(options = {}) {
 }
 
 function readBody(req, options = {}) {
+  return readRawBody(req, options).then((raw) => {
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (!raw.length) return {};
+    if (contentType === 'application/x-www-form-urlencoded') {
+      return Object.fromEntries(new URLSearchParams(raw.toString('utf8')));
+    }
+    if (contentType && contentType !== 'application/json') {
+      const error = new Error('unsupported content type');
+      error.statusCode = 415;
+      throw error;
+    }
+    return JSON.parse(raw.toString('utf8'));
+  });
+}
+
+function readRawBody(req, options = {}) {
   const maxBytes = Number(options.maxBytes || DEFAULT_MAX_BODY_BYTES);
   return new Promise((resolve, reject) => {
-    let body = '';
+    const chunks = [];
     let bytes = 0;
     let tooLarge = false;
-    req.setEncoding('utf8');
     req.on('data', (chunk) => {
       if (tooLarge) return;
-      bytes += Buffer.byteLength(chunk, 'utf8');
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.length;
       if (bytes > maxBytes) {
         tooLarge = true;
-        body = '';
+        chunks.length = 0;
         return;
       }
-      body += chunk;
+      chunks.push(buffer);
     });
     req.on('end', () => {
-      try {
-        const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
-        if (tooLarge) {
-          const error = new Error('request body too large');
-          error.statusCode = 413;
-          reject(error);
-          return;
-        }
-        if (!body) {
-          resolve({});
-          return;
-        }
-        if (contentType === 'application/x-www-form-urlencoded') {
-          resolve(Object.fromEntries(new URLSearchParams(body)));
-          return;
-        }
-        if (contentType && contentType !== 'application/json') {
-          const error = new Error('unsupported content type');
-          error.statusCode = 415;
-          reject(error);
-          return;
-        }
-        resolve(JSON.parse(body));
-      } catch (error) {
+      if (tooLarge) {
+        const error = new Error('request body too large');
+        error.statusCode = 413;
         reject(error);
+        return;
       }
+      resolve(Buffer.concat(chunks));
     });
     req.on('error', reject);
   });
 }
 
+async function readMultipartForm(req, options = {}) {
+  const contentType = req.headers['content-type'] || '';
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!boundaryMatch) {
+    const error = new Error('unsupported content type');
+    error.statusCode = 415;
+    throw error;
+  }
+
+  const boundary = boundaryMatch[1] || boundaryMatch[2];
+  const raw = await readRawBody(req, options);
+  const delimiter = Buffer.from(`--${boundary}`);
+  const fields = {};
+  let file = null;
+  let position = raw.indexOf(delimiter);
+
+  while (position !== -1) {
+    const nextPosition = raw.indexOf(delimiter, position + delimiter.length);
+    if (nextPosition === -1) break;
+    let part = raw.slice(position + delimiter.length, nextPosition);
+    position = nextPosition;
+
+    if (part.subarray(0, 2).toString() === '--') continue;
+    if (part.subarray(0, 2).toString() === '\r\n') part = part.subarray(2);
+    if (part.subarray(part.length - 2).toString() === '\r\n') part = part.subarray(0, part.length - 2);
+
+    const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'));
+    if (headerEnd === -1) continue;
+    const headerText = part.subarray(0, headerEnd).toString('utf8');
+    const content = part.subarray(headerEnd + 4);
+    const headers = parsePartHeaders(headerText);
+    const disposition = headers['content-disposition'] || '';
+    const name = readHeaderParameter(disposition, 'name');
+    const fileName = readHeaderParameter(disposition, 'filename');
+    if (!name) continue;
+
+    if (fileName) {
+      file = {
+        name,
+        fileName,
+        contentType: headers['content-type'] || 'application/octet-stream',
+        content
+      };
+    } else {
+      fields[name] = content.toString('utf8');
+    }
+  }
+
+  return { fields, file };
+}
+
+function parsePartHeaders(text) {
+  const headers = {};
+  for (const line of text.split('\r\n')) {
+    const index = line.indexOf(':');
+    if (index === -1) continue;
+    headers[line.slice(0, index).trim().toLowerCase()] = line.slice(index + 1).trim();
+  }
+  return headers;
+}
+
+function readHeaderParameter(headerValue, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = headerValue.match(new RegExp(`${escaped}="([^"]*)"`, 'i'));
+  return match ? match[1] : '';
+}
+
 function sendJson(res, statusCode, payload) {
   sendText(res, statusCode, JSON.stringify(payload), 'application/json; charset=utf-8');
+}
+
+function sendDownload(res, statusCode, payload, contentType, fileName) {
+  res.writeHead(statusCode, {
+    'content-type': contentType,
+    'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`
+  });
+  res.end(payload);
 }
 
 function sendText(res, statusCode, payload, contentType) {

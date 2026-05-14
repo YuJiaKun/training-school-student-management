@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { apiGet, apiPost } from '../api.js';
+import { apiGet, apiPost, apiUpload } from '../api.js';
 import StatusBadge, { statusText } from '../components/StatusBadge.jsx';
 
 const EMPTY_FORM = {
@@ -48,6 +48,12 @@ function findTeacher(teachers, teacherId) {
   return teachers.find((teacher) => Number(teacher.id) === Number(teacherId));
 }
 
+function homeworkStatusText(status) {
+  if (status === 'submitted' || status === 'reviewed') return '已提交';
+  if (status === 'pending') return '待提交';
+  return statusText(status);
+}
+
 export default function StudentWorkspace({ user = {} }) {
   const [student, setStudent] = useState(null);
   const [homeworkRecords, setHomeworkRecords] = useState([]);
@@ -57,6 +63,7 @@ export default function StudentWorkspace({ user = {} }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [submittingHomeworkId, setSubmittingHomeworkId] = useState(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -150,13 +157,40 @@ export default function StudentWorkspace({ user = {} }) {
     }
   }
 
+  async function handleHomeworkSubmit(event, record) {
+    event.preventDefault();
+    const fileInput = event.currentTarget.elements.homeworkFile;
+    const remarkInput = event.currentTarget.elements.homeworkRemark;
+    const file = fileInput?.files?.[0];
+    if (!file) {
+      setError('请先选择要上传的作业文件');
+      return;
+    }
+
+    setSubmittingHomeworkId(record.id);
+    setError('');
+    setSuccess('');
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('remark', remarkInput?.value || '');
+      await apiUpload(`/api/homework/${record.id}/submission`, formData);
+      setSuccess('作业已提交，老师端会同步看到提交状态。');
+      await loadStudentData();
+    } catch (err) {
+      setError(err.message || '作业提交失败');
+    } finally {
+      setSubmittingHomeworkId(null);
+    }
+  }
+
   return (
     <section className="page student-workspace">
       <header className="page-header">
         <div>
           <p className="eyebrow">学生端</p>
           <h1>我的学习与面试中心</h1>
-          <p className="muted">查看个人进度、作业反馈和面试记录，也可以主动发起排期申请。</p>
+          <p className="muted">查看个人进度、提交作业文件和面试记录，也可以主动发起排期申请。</p>
         </div>
       </header>
 
@@ -192,21 +226,43 @@ export default function StudentWorkspace({ user = {} }) {
           <div className="workspace-grid">
             <section className="panel">
               <div className="panel-header">
-                <h2>作业记录</h2>
+                <h2>作业提交</h2>
                 <span>{homeworkRecords.length} 条</span>
               </div>
               {!homeworkRecords.length && <div className="empty-state">暂无作业记录。</div>}
               <div className="record-list">
                 {homeworkRecords.map((record) => (
                   <article className="record-item" key={record.id}>
-                    <div>
+                    <div className="record-main">
                       <strong>{record.homeworkName || '未命名作业'}</strong>
-                      <p>{record.className || '未填写班级'} / <StatusBadge status={record.submitStatus} /></p>
-                      <p className="muted">
-                        提交时间：{record.submitAt || '未提交'}；批改结果：
-                        {record.reviewResult ? statusText(record.reviewResult) : '暂无'}
+                      <p>
+                        {record.className || '未填写班级'} / <StatusBadge status={record.submitStatus === 'reviewed' ? 'submitted' : record.submitStatus}>
+                          {homeworkStatusText(record.submitStatus)}
+                        </StatusBadge>
                       </p>
+                      <p className="muted">
+                        截止日期：{record.dueDate || '未设置'}；提交时间：{record.submitAt ? record.submitAt.replace('T', ' ').slice(0, 16) : '未提交'}
+                      </p>
+                      {record.description ? <p className="muted">说明：{record.description}</p> : null}
+                      {record.fileName ? <p className="muted">已上传：{record.fileName}</p> : null}
                     </div>
+                    <form className="homework-upload-form" onSubmit={(event) => handleHomeworkSubmit(event, record)}>
+                      <input
+                        name="homeworkFile"
+                        type="file"
+                        accept=".txt,text/plain"
+                        disabled={submittingHomeworkId === record.id}
+                        required
+                      />
+                      <input
+                        name="homeworkRemark"
+                        placeholder="备注，可选"
+                        disabled={submittingHomeworkId === record.id}
+                      />
+                      <button className="button button-primary" type="submit" disabled={submittingHomeworkId === record.id}>
+                        {submittingHomeworkId === record.id ? '正在上传...' : record.fileName ? '重新上传' : '上传作业'}
+                      </button>
+                    </form>
                   </article>
                 ))}
               </div>

@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 
 function createDatabase(options = {}) {
   const filePath = options.filePath || null;
@@ -11,25 +11,33 @@ function createDatabase(options = {}) {
     filePath,
     schemaVersion: state.schemaVersion,
     students: state.students,
+    homeworkAssignments: state.homeworkAssignments,
     homeworkRecords: state.homeworkRecords,
     interviewRecords: state.interviewRecords,
     interviewSchedules: state.interviewSchedules,
+    authAccounts: state.authAccounts,
     nextStudentId: state.nextStudentId,
+    nextHomeworkAssignmentId: state.nextHomeworkAssignmentId,
     nextHomeworkId: state.nextHomeworkId,
     nextInterviewId: state.nextInterviewId,
     nextInterviewScheduleId: state.nextInterviewScheduleId,
+    nextAuthAccountId: state.nextAuthAccountId,
     save() {
       if (!filePath) return;
       const payload = JSON.stringify({
         schemaVersion: CURRENT_SCHEMA_VERSION,
         students: this.students,
+        homeworkAssignments: this.homeworkAssignments,
         homeworkRecords: this.homeworkRecords,
         interviewRecords: this.interviewRecords,
         interviewSchedules: this.interviewSchedules,
+        authAccounts: this.authAccounts,
         nextStudentId: this.nextStudentId,
+        nextHomeworkAssignmentId: this.nextHomeworkAssignmentId,
         nextHomeworkId: this.nextHomeworkId,
         nextInterviewId: this.nextInterviewId,
-        nextInterviewScheduleId: this.nextInterviewScheduleId
+        nextInterviewScheduleId: this.nextInterviewScheduleId,
+        nextAuthAccountId: this.nextAuthAccountId
       }, null, 2);
       const tmpPath = `${filePath}.tmp`;
       const backupPath = `${filePath}.bak`;
@@ -63,32 +71,42 @@ function createEmptyState() {
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     students: [],
+    homeworkAssignments: [],
     homeworkRecords: [],
     interviewRecords: [],
     interviewSchedules: [],
+    authAccounts: [],
     nextStudentId: 1,
+    nextHomeworkAssignmentId: 1,
     nextHomeworkId: 1,
     nextInterviewId: 1,
-    nextInterviewScheduleId: 1
+    nextInterviewScheduleId: 1,
+    nextAuthAccountId: 1
   };
 }
 
 function normalizeState(raw) {
   const students = normalizeStudents(raw.students || []);
-  const homeworkRecords = normalizeRecords(raw.homeworkRecords || [], 'studentId');
+  const homeworkAssignments = normalizeHomeworkAssignments(raw.homeworkAssignments || []);
+  const homeworkRecords = normalizeHomeworkRecords(raw.homeworkRecords || []);
   const interviewRecords = normalizeRecords(raw.interviewRecords || [], 'studentId');
   const interviewSchedules = normalizeRecords(raw.interviewSchedules || [], 'studentId');
+  const authAccounts = normalizeAuthAccounts(raw.authAccounts || []);
 
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     students,
+    homeworkAssignments,
     homeworkRecords,
     interviewRecords,
     interviewSchedules,
+    authAccounts,
     nextStudentId: nextId(raw.nextStudentId, students),
+    nextHomeworkAssignmentId: nextId(raw.nextHomeworkAssignmentId, homeworkAssignments),
     nextHomeworkId: nextId(raw.nextHomeworkId, homeworkRecords),
     nextInterviewId: nextId(raw.nextInterviewId, interviewRecords),
-    nextInterviewScheduleId: nextId(raw.nextInterviewScheduleId, interviewSchedules)
+    nextInterviewScheduleId: nextId(raw.nextInterviewScheduleId, interviewSchedules),
+    nextAuthAccountId: nextId(raw.nextAuthAccountId, authAccounts)
   };
 }
 
@@ -107,12 +125,48 @@ function normalizeStudents(students) {
   })).filter((student) => Number.isInteger(student.id) && student.id > 0);
 }
 
+function normalizeHomeworkAssignments(assignments) {
+  return assignments.map((assignment) => ({
+    id: Number(assignment.id),
+    homeworkName: assignment.homeworkName || '',
+    className: assignment.className || '',
+    dueDate: assignment.dueDate || '',
+    description: assignment.description || '',
+    createdAt: assignment.createdAt || '',
+    createdByRole: assignment.createdByRole || '',
+    createdByName: assignment.createdByName || ''
+  })).filter((assignment) => Number.isInteger(assignment.id) && assignment.id > 0);
+}
+
+function normalizeHomeworkRecords(records) {
+  return records.map((record) => ({
+    ...record,
+    id: Number(record.id),
+    studentId: Number(record.studentId),
+    assignmentId: record.assignmentId ? Number(record.assignmentId) : null,
+    fileSize: record.fileSize ? Number(record.fileSize) : 0
+  })).filter((record) => Number.isInteger(record.id) && record.id > 0);
+}
+
 function normalizeRecords(records, numericKey) {
   return records.map((record) => ({
     ...record,
     id: Number(record.id),
     [numericKey]: Number(record[numericKey])
   })).filter((record) => Number.isInteger(record.id) && record.id > 0);
+}
+
+function normalizeAuthAccounts(accounts) {
+  return accounts.map((account) => ({
+    id: Number(account.id),
+    username: account.username || '',
+    password: account.password || '',
+    role: account.role || 'student',
+    studentId: account.studentId ? Number(account.studentId) : null,
+    teacherId: account.teacherId ? Number(account.teacherId) : null,
+    status: account.status || 'active',
+    createdAt: account.createdAt || ''
+  })).filter((account) => Number.isInteger(account.id) && account.id > 0);
 }
 
 function nextId(rawNextId, records) {

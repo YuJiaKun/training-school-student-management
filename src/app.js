@@ -1,4 +1,6 @@
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const DEFAULT_SESSION_MAX_AGE_SECONDS = 60 * 60 * 8;
 const DEFAULT_AUTH_ACCOUNTS = [
@@ -10,6 +12,8 @@ const DEFAULT_TEACHERS = [{ id: 1, name: '张老师' }];
 const VALID_ROLES = new Set(['admin', 'teacher', 'student']);
 const VALID_STUDENT_STATUSES = new Set(['active', 'archived']);
 const VALID_HOMEWORK_SUBMIT_STATUSES = new Set(['pending', 'submitted', 'reviewed']);
+const ALLOWED_HOMEWORK_FILE_EXTENSIONS = new Set(['.txt']);
+const DEFAULT_HOMEWORK_MAX_FILE_BYTES = 20 * 1024 * 1024;
 const VALID_INTERVIEW_RESULTS = new Set(['pending', 'passed', 'failed']);
 const VALID_HIRED_STATUSES = new Set(['pending', 'hired', 'not_hired']);
 const VALID_SCHEDULE_STATUSES = new Set(['requested', 'scheduled', 'confirmed', 'rescheduled', 'completed', 'cancelled']);
@@ -21,13 +25,18 @@ function createAppWithOptions({
   db,
   authAccounts = DEFAULT_AUTH_ACCOUNTS,
   teachers = DEFAULT_TEACHERS,
-  sessionMaxAgeSeconds = DEFAULT_SESSION_MAX_AGE_SECONDS
+  sessionMaxAgeSeconds = DEFAULT_SESSION_MAX_AGE_SECONDS,
+  uploadRoot = defaultUploadRoot(db),
+  homeworkMaxFileBytes = DEFAULT_HOMEWORK_MAX_FILE_BYTES
 }) {
   const sessions = new Map();
   const loginFailures = new Map();
-  const accounts = normalizeAuthAccounts(authAccounts);
+  const baseAuthAccounts = normalizeAuthAccounts(authAccounts);
+  if (!Array.isArray(db.authAccounts)) db.authAccounts = [];
+  if (!Number.isInteger(db.nextAuthAccountId)) db.nextAuthAccountId = nextRuntimeId(db.authAccounts);
   const teacherDirectory = normalizeTeachers(teachers);
   const sessionMaxAgeMs = Number(sessionMaxAgeSeconds || DEFAULT_SESSION_MAX_AGE_SECONDS) * 1000;
+  const maxHomeworkFileBytes = Number(homeworkMaxFileBytes || DEFAULT_HOMEWORK_MAX_FILE_BYTES);
 
   return {
     createStudent(input) {
@@ -69,6 +78,7 @@ function createAppWithOptions({
     listStudents(filters = {}) {
       const page = Number(filters.page || 1);
       const pageSize = Number(filters.pageSize || db.students.length || 1);
+      const accountDirectory = listAllAuthAccounts(baseAuthAccounts, db);
       const items = db.students.filter((student) => {
         if (filters.status && student.status !== filters.status) return false;
         if (filters.keyword) {
@@ -77,10 +87,14 @@ function createAppWithOptions({
         }
         if (filters.className && student.className !== filters.className) return false;
         return true;
-      });
+      }).map((student) => withStudentAccountInfo(student, accountDirectory));
       const start = (page - 1) * pageSize;
 
       return { items: items.slice(start, start + pageSize), total: items.length };
+    },
+
+    exportStudentImportTemplate() {
+      return toCsvWithBom([['姓名', '手机号', '性别', '出生日期', '班级/课程', '入学日期', '备注']]);
     },
 
     previewStudentImport(input = {}) {
@@ -95,7 +109,45 @@ function createAppWithOptions({
         throw error;
       }
       const created = preview.rows.map((row) => this.createStudent(row.student));
-      return { ...preview, created };
+      const accountResult = input.generateAccounts
+        ? this.generateStudentAccounts({ studentIds: created.map((student) => student.id) })
+        : { accounts: [], skipped: [], skippedCount: 0 };
+      return { ...preview, created, ...accountResult };
+    },
+
+    generateStudentAccounts(input = {}) {
+      const students = resolveAccountGenerationStudents(db, input);
+      const usedUsernames = new Set(listAllAuthAccounts(baseAuthAccounts, db).map((account) => account.username));
+      const existingStudentIds = new Set(listAllAuthAccounts(baseAuthAccounts, db)
+        .filter((account) => account.role === 'student' && account.status !== 'disabled' && account.studentId)
+        .map((account) => Number(account.studentId)));
+      const accounts = [];
+      const skipped = [];
+
+      for (const student of students) {
+        if (existingStudentIds.has(Number(student.id))) {
+          skipped.push({ studentId: student.id, reason: '已有账号' });
+          continue;
+        }
+
+        const username = uniqueStudentUsername(student, usedUsernames);
+        usedUsernames.add(username);
+        existingStudentIds.add(Number(student.id));
+        const account = {
+          id: db.nextAuthAccountId++,
+          username,
+          password: generateInitialPassword(),
+          role: 'student',
+          studentId: student.id,
+          teacherId: null,
+          status: 'active',
+          createdAt: new Date().toISOString()
+        };
+        db.authAccounts.push(account);
+        accounts.push(publicStudentAccount(db, account));
+      }
+
+      return { accounts, skipped, skippedCount: skipped.length };
     },
 
     archiveStudent(id) {
@@ -106,18 +158,72 @@ function createAppWithOptions({
       return student;
     },
 
+    createHomeworkAssignment(input = {}, session = {}) {
+      const homeworkName = String(input.homeworkName || '').trim();
+      const className = String(input.className || '').trim();
+      if (!homeworkName || !className) {
+        throw new Error('homework name and class are required');
+      }
+
+      const assignment = {
+        id: db.nextHomeworkAssignmentId++,
+        homeworkName,
+        className,
+        dueDate: input.dueDate || '',
+        description: input.description || '',
+        createdAt: input.createdAt || new Date().toISOString(),
+        createdByRole: session.role || input.createdByRole || '',
+        createdByName: session.username || input.createdByName || ''
+      };
+      db.homeworkAssignments.push(assignment);
+
+      const records = db.students
+        .filter((student) => student.status === 'active')
+        .filter((student) => student.className === className)
+        .map((student) => this.addHomeworkRecord({
+          assignmentId: assignment.id,
+          studentId: student.id,
+          homeworkName,
+          className,
+          dueDate: assignment.dueDate,
+          description: assignment.description,
+          submitStatus: 'pending'
+        }));
+
+      return { assignment: { ...assignment }, records };
+    },
+
+    listHomeworkAssignments(filters = {}) {
+      const items = db.homeworkAssignments
+        .filter((assignment) => {
+          if (filters.className && assignment.className !== filters.className) return false;
+          if (filters.keyword && !assignment.homeworkName.includes(filters.keyword)) return false;
+          return true;
+        })
+        .map((assignment) => withHomeworkAssignmentStats(db, assignment))
+        .sort((left, right) => right.id - left.id);
+      return { items, total: items.length };
+    },
+
     addHomeworkRecord(input) {
       const studentId = requireExistingStudent(db, input.studentId).id;
       const submitStatus = normalizeEnum(input.submitStatus || 'pending', VALID_HOMEWORK_SUBMIT_STATUSES, 'invalid homework submit status');
       const record = {
         id: db.nextHomeworkId++,
+        assignmentId: input.assignmentId ? Number(input.assignmentId) : null,
         studentId,
         homeworkName: input.homeworkName || '',
         className: input.className || '',
+        dueDate: input.dueDate || '',
+        description: input.description || '',
         submitStatus,
         submitAt: input.submitAt || '',
         reviewResult: input.reviewResult || '',
-        remark: input.remark || ''
+        remark: input.remark || '',
+        fileName: input.fileName || '',
+        filePath: input.filePath || '',
+        fileSize: input.fileSize || 0,
+        fileType: input.fileType || ''
       };
       db.homeworkRecords.push(record);
       return record;
@@ -131,23 +237,82 @@ function createAppWithOptions({
       }
       record.homeworkName = patch.homeworkName ?? record.homeworkName;
       record.className = patch.className ?? record.className;
+      record.dueDate = patch.dueDate ?? record.dueDate;
+      record.description = patch.description ?? record.description;
       record.submitStatus = patch.submitStatus === undefined
         ? record.submitStatus
         : normalizeEnum(patch.submitStatus, VALID_HOMEWORK_SUBMIT_STATUSES, 'invalid homework submit status');
       record.submitAt = patch.submitAt ?? record.submitAt;
       record.reviewResult = patch.reviewResult ?? record.reviewResult;
       record.remark = patch.remark ?? record.remark;
+      record.fileName = patch.fileName ?? record.fileName;
+      record.filePath = patch.filePath ?? record.filePath;
+      record.fileSize = patch.fileSize ?? record.fileSize;
+      record.fileType = patch.fileType ?? record.fileType;
       return record;
     },
 
     listHomeworkRecords(filters = {}) {
       const items = db.homeworkRecords.filter((record) => {
+        const student = db.students.find((item) => item.id === record.studentId);
         if (filters.studentId && record.studentId !== Number(filters.studentId)) return false;
+        if (filters.assignmentId && Number(record.assignmentId) !== Number(filters.assignmentId)) return false;
         if (filters.className && record.className !== filters.className) return false;
-        if (filters.submitStatus && record.submitStatus !== filters.submitStatus) return false;
+        if (filters.submitStatus === 'submitted' && !isHomeworkSubmittedStatus(record.submitStatus)) return false;
+        if (filters.submitStatus && filters.submitStatus !== 'submitted' && record.submitStatus !== filters.submitStatus) return false;
+        if (filters.keyword) {
+          const text = `${record.homeworkName} ${record.className} ${student?.name || ''} ${student?.phone || ''}`;
+          if (!text.includes(filters.keyword)) return false;
+        }
         return true;
-      });
+      }).map((record) => withHomeworkStudent(db, record));
       return { items, total: items.length };
+    },
+
+    submitHomeworkFile(id, input = {}) {
+      const record = db.homeworkRecords.find((item) => item.id === Number(id));
+      if (!record) throw new Error('homework record not found');
+      if (input.studentId !== undefined && Number(input.studentId) !== Number(record.studentId)) {
+        throw createHttpError('forbidden', 403);
+      }
+
+      const fileName = String(input.fileName || '').trim();
+      const content = Buffer.isBuffer(input.content) ? input.content : Buffer.from(input.content || '');
+      assertAllowedHomeworkFile(fileName, content, maxHomeworkFileBytes);
+
+      const assignmentId = record.assignmentId || 'legacy';
+      const targetDir = path.join(uploadRoot, 'homework', String(assignmentId));
+      const safeName = sanitizeFileName(fileName);
+      const storedName = `${record.id}-${Date.now()}-${safeName}`;
+      const filePath = path.join(targetDir, storedName);
+      fs.mkdirSync(targetDir, { recursive: true });
+      removeStoredHomeworkFile(record, uploadRoot);
+      fs.writeFileSync(filePath, content);
+
+      record.submitStatus = 'submitted';
+      record.submitAt = input.submittedAt || new Date().toISOString();
+      record.remark = input.remark ?? record.remark;
+      record.fileName = fileName;
+      record.filePath = filePath;
+      record.fileSize = content.length;
+      record.fileType = inferHomeworkFileType(fileName) || input.contentType || 'application/octet-stream';
+      return withHomeworkStudent(db, record);
+    },
+
+    getHomeworkFile(id, session = {}) {
+      const record = db.homeworkRecords.find((item) => item.id === Number(id));
+      if (!record) throw new Error('homework record not found');
+      if (session.role === 'student' && Number(session.studentId) !== Number(record.studentId)) {
+        throw createHttpError('forbidden', 403);
+      }
+      if (!record.filePath || !fs.existsSync(record.filePath)) {
+        throw createHttpError('homework file not found', 404);
+      }
+      return {
+        fileName: record.fileName || path.basename(record.filePath),
+        contentType: record.fileType || inferHomeworkFileType(record.fileName),
+        body: fs.readFileSync(record.filePath)
+      };
     },
 
     addInterviewRecord(input) {
@@ -354,7 +519,7 @@ function createAppWithOptions({
     getDashboardStats() {
       const active = db.students.filter((student) => student.status === 'active').length;
       const archived = db.students.filter((student) => student.status === 'archived').length;
-      const completed = db.homeworkRecords.filter((record) => record.submitStatus === 'submitted').length;
+      const completed = db.homeworkRecords.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length;
       const hired = db.interviewRecords.filter((record) => record.hiredStatus === 'hired').length;
       const interviewTotal = db.interviewRecords.length;
 
@@ -366,15 +531,31 @@ function createAppWithOptions({
       };
     },
 
+    getHomeworkAnalytics(filters = {}) {
+      return buildHomeworkAnalytics(db, filters);
+    },
+
     listTeachers() {
       return { items: teacherDirectory.map((teacher) => ({ ...teacher })), total: teacherDirectory.length };
+    },
+
+    listClasses() {
+      const classes = new Map();
+      for (const student of db.students) {
+        if (student.status !== 'active' || !student.className) continue;
+        classes.set(student.className, (classes.get(student.className) || 0) + 1);
+      }
+      const items = Array.from(classes.entries())
+        .map(([className, studentCount]) => ({ className, studentCount }))
+        .sort((left, right) => left.className.localeCompare(right.className, 'zh-CN'));
+      return { items, total: items.length };
     },
 
     login({ username, password }) {
       clearExpiredSessions(sessions);
       const normalizedUsername = String(username || '').trim();
       assertLoginAllowed(loginFailures, normalizedUsername);
-      const account = accounts.find((item) => item.username === normalizedUsername);
+      const account = listAllAuthAccounts(baseAuthAccounts, db).find((item) => item.username === normalizedUsername);
       if (!account || account.password !== password) {
         recordLoginFailure(loginFailures, normalizedUsername);
         throw new Error('invalid credentials');
@@ -420,13 +601,104 @@ function createAppWithOptions({
       return toCsvWithBom(rows);
     },
 
-    exportHomeworkRecords(filters = {}) {
-      const records = this.listHomeworkRecords(filters).items;
-      const rows = [['作业名称', '学生ID', '班级/课程', '提交状态', '提交时间', '批改结果', '备注']];
-      for (const record of records) {
-        rows.push([record.homeworkName, record.studentId, record.className, record.submitStatus, record.submitAt, record.reviewResult, record.remark]);
+    exportStudentAccounts(filters = {}) {
+      const students = this.listStudents(filters).items;
+      const accountDirectory = listAllAuthAccounts(baseAuthAccounts, db);
+      const rows = [['学生姓名', '班级/课程', '手机号', '用户名', '初始密码']];
+      for (const student of students) {
+        const account = findStudentAccount(accountDirectory, student.id);
+        if (!account) continue;
+        rows.push([student.name, student.className, student.phone, account.username, account.password]);
       }
       return toCsvWithBom(rows);
+    },
+
+    exportHomeworkRecords(filters = {}) {
+      const records = this.listHomeworkRecords(filters).items;
+      const rows = [['作业名称', '学生姓名', '手机号', '班级/课程', '提交状态', '提交时间', '文件名', '备注']];
+      for (const record of records) {
+        rows.push([record.homeworkName, record.studentName || `#${record.studentId}`, record.studentPhone || '', record.className, statusLabel(record.submitStatus), record.submitAt, record.fileName || '', record.remark]);
+      }
+      return toCsvWithBom(rows);
+    },
+
+    exportHomeworkAssignmentZip(assignmentId) {
+      const assignment = db.homeworkAssignments.find((item) => item.id === Number(assignmentId));
+      if (!assignment) throw new Error('homework assignment not found');
+      const records = this.listHomeworkRecords({ assignmentId }).items;
+      const rows = [['作业名称', '班级/课程', '学生姓名', '手机号', '提交状态', '提交时间', '文件名', '备注']];
+      const entries = [];
+
+      for (const record of records) {
+        rows.push([
+          record.homeworkName,
+          record.className,
+          record.studentName || `#${record.studentId}`,
+          record.studentPhone || '',
+          statusLabel(record.submitStatus),
+          record.submitAt || '',
+          record.fileName || '',
+          record.remark || ''
+        ]);
+
+        if (record.filePath && fs.existsSync(record.filePath)) {
+          const studentName = sanitizeFileName(record.studentName || `学生${record.studentId}`);
+          const fileName = sanitizeFileName(record.fileName || path.basename(record.filePath));
+          entries.push({
+            name: `提交文件/${studentName}-${record.studentId}-${fileName}`,
+            data: fs.readFileSync(record.filePath)
+          });
+        }
+      }
+
+      entries.unshift({ name: '提交清单.csv', data: Buffer.from(toCsvWithBom(rows), 'utf8') });
+
+      return {
+        fileName: `${sanitizeFileName(assignment.homeworkName)}-作业提交.zip`,
+        contentType: 'application/zip',
+        body: createZip(entries)
+      };
+    },
+
+    exportHomeworkStudentZip(studentId, filters = {}) {
+      const student = requireExistingStudent(db, studentId);
+      const records = this.listHomeworkRecords({
+        studentId: student.id,
+        assignmentId: filters.assignmentId,
+        className: filters.className
+      }).items;
+      const rows = [['作业名称', '班级/课程', '学生姓名', '手机号', '提交状态', '提交时间', '文件名', '备注']];
+      const entries = [];
+
+      for (const record of records) {
+        rows.push([
+          record.homeworkName,
+          record.className,
+          record.studentName || student.name || `#${record.studentId}`,
+          record.studentPhone || student.phone || '',
+          statusLabel(record.submitStatus),
+          record.submitAt || '',
+          record.fileName || '',
+          record.remark || ''
+        ]);
+
+        if (record.filePath && fs.existsSync(record.filePath)) {
+          const homeworkName = sanitizeFileName(record.homeworkName || `作业${record.id}`);
+          const fileName = sanitizeFileName(record.fileName || path.basename(record.filePath));
+          entries.push({
+            name: `提交文件/${homeworkName}-${student.id}-${fileName}`,
+            data: fs.readFileSync(record.filePath)
+          });
+        }
+      }
+
+      entries.unshift({ name: '提交清单.csv', data: Buffer.from(toCsvWithBom(rows), 'utf8') });
+
+      return {
+        fileName: `${sanitizeFileName(student.name || `学生${student.id}`)}-作业提交.zip`,
+        contentType: 'application/zip',
+        body: createZip(entries)
+      };
     },
 
     exportInterviewRecords(filters = {}) {
@@ -455,13 +727,101 @@ function normalizeAuthAccounts(authAccounts) {
     }
 
     return {
+      id: account.id ? Number(account.id) : null,
       username,
       password,
       role,
       teacherId: account.teacherId ? Number(account.teacherId) : null,
-      studentId: account.studentId ? Number(account.studentId) : null
+      studentId: account.studentId ? Number(account.studentId) : null,
+      status: account.status || 'active',
+      createdAt: account.createdAt || ''
     };
   });
+}
+
+function listAllAuthAccounts(baseAuthAccounts, db) {
+  const storedAccounts = Array.isArray(db.authAccounts) ? db.authAccounts : [];
+  return [
+    ...baseAuthAccounts,
+    ...(storedAccounts.length ? normalizeAuthAccounts(storedAccounts) : [])
+  ].filter((account) => account.status !== 'disabled');
+}
+
+function nextRuntimeId(records) {
+  const maxId = (records || []).reduce((max, record) => {
+    const id = Number(record.id);
+    return Number.isInteger(id) && id > max ? id : max;
+  }, 0);
+  return maxId + 1;
+}
+
+function withStudentAccountInfo(student, accountDirectory) {
+  const account = accountDirectory.find((item) => item.role === 'student' && Number(item.studentId) === Number(student.id));
+  return {
+    ...student,
+    hasAccount: Boolean(account),
+    accountUsername: account?.username || ''
+  };
+}
+
+function findStudentAccount(accountDirectory, studentId) {
+  return (accountDirectory || [])
+    .filter((account) => account.role === 'student' && account.status !== 'disabled')
+    .find((account) => Number(account.studentId) === Number(studentId));
+}
+
+function resolveAccountGenerationStudents(db, input = {}) {
+  const requestedIds = Array.isArray(input.studentIds)
+    ? new Set(input.studentIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))
+    : null;
+  const filters = input.filters || {};
+
+  return db.students
+    .filter((student) => student.status === 'active')
+    .filter((student) => !requestedIds || requestedIds.has(Number(student.id)))
+    .filter((student) => !filters.status || student.status === filters.status)
+    .filter((student) => !filters.className || student.className === filters.className)
+    .filter((student) => {
+      if (!filters.keyword) return true;
+      return `${student.name} ${student.phone}`.includes(filters.keyword);
+    });
+}
+
+function uniqueStudentUsername(student, usedUsernames) {
+  const rawBase = String(student.phone || '').replace(/\D/g, '') || `student${student.id}`;
+  let username = rawBase;
+  let suffix = 1;
+  while (usedUsernames.has(username)) {
+    username = `${rawBase}-${suffix}`;
+    suffix += 1;
+  }
+  return username;
+}
+
+function generateInitialPassword() {
+  return crypto.randomBytes(4).toString('hex');
+}
+
+function publicStudentAccount(db, account) {
+  const student = db.students.find((item) => Number(item.id) === Number(account.studentId));
+  return {
+    id: account.id,
+    username: account.username,
+    password: account.password,
+    role: account.role,
+    studentId: account.studentId,
+    studentName: student?.name || '',
+    studentPhone: student?.phone || '',
+    className: student?.className || '',
+    createdAt: account.createdAt || ''
+  };
+}
+
+function defaultUploadRoot(db) {
+  if (db?.filePath) {
+    return path.join(path.dirname(db.filePath), 'uploads');
+  }
+  return path.join(process.cwd(), 'data', 'uploads');
 }
 
 function normalizeTeachers(teachers) {
@@ -472,12 +832,298 @@ function normalizeTeachers(teachers) {
   }));
 }
 
+function withHomeworkAssignmentStats(db, assignment) {
+  const records = db.homeworkRecords.filter((record) => Number(record.assignmentId) === Number(assignment.id));
+  const submittedCount = records.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length;
+  const totalCount = records.length;
+  return {
+    ...assignment,
+    totalCount,
+    submittedCount,
+    pendingCount: totalCount - submittedCount
+  };
+}
+
+function isHomeworkSubmittedStatus(status) {
+  return status === 'submitted' || status === 'reviewed';
+}
+
+function buildHomeworkAnalytics(db, filters = {}) {
+  const className = String(filters.className || '').trim();
+  const activeStudents = db.students.filter((student) => student.status === 'active');
+  const students = className ? activeStudents.filter((student) => student.className === className) : activeStudents;
+  const assignments = db.homeworkAssignments
+    .filter((assignment) => !className || assignment.className === className)
+    .slice()
+    .sort((left, right) => right.id - left.id);
+  const records = db.homeworkRecords.filter((record) => {
+    if (className && record.className !== className) return false;
+    return true;
+  });
+  const latestAssignment = assignments[0] || null;
+
+  return {
+    overview: buildHomeworkOverview(students, assignments, records),
+    classes: buildHomeworkClassAnalytics(activeStudents, db.homeworkAssignments, db.homeworkRecords, className),
+    assignments: assignments.map((assignment) => {
+      const assignmentRecords = records.filter((record) => Number(record.assignmentId) === Number(assignment.id));
+      return {
+        id: assignment.id,
+        homeworkName: assignment.homeworkName,
+        className: assignment.className,
+        dueDate: assignment.dueDate || '',
+        createdAt: assignment.createdAt || '',
+        ...completionStats(assignmentRecords)
+      };
+    }),
+    students: students.map((student) => {
+      const studentRecords = records.filter((record) => Number(record.studentId) === Number(student.id));
+      const latestSubmitAt = studentRecords
+        .filter((record) => isHomeworkSubmittedStatus(record.submitStatus) && record.submitAt)
+        .map((record) => record.submitAt)
+        .sort()
+        .at(-1) || '';
+      return {
+        studentId: student.id,
+        studentName: student.name || '',
+        studentPhone: student.phone || '',
+        className: student.className || '',
+        assignedCount: studentRecords.length,
+        submittedCount: studentRecords.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length,
+        pendingCount: studentRecords.filter((record) => !isHomeworkSubmittedStatus(record.submitStatus)).length,
+        completionRate: percentage(studentRecords.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length, studentRecords.length),
+        latestSubmitAt
+      };
+    }).sort((left, right) => {
+      if (left.completionRate !== right.completionRate) return left.completionRate - right.completionRate;
+      return left.studentId - right.studentId;
+    }),
+    latestAssignment: latestAssignment ? buildLatestHomeworkAssignment(db, latestAssignment, records) : null
+  };
+}
+
+function buildHomeworkOverview(students, assignments, records) {
+  const submittedCount = records.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length;
+  return {
+    studentCount: students.length,
+    assignmentCount: assignments.length,
+    recordCount: records.length,
+    submittedCount,
+    pendingCount: records.length - submittedCount,
+    completionRate: percentage(submittedCount, records.length)
+  };
+}
+
+function buildHomeworkClassAnalytics(students, assignments, records, selectedClassName = '') {
+  const classNames = new Set();
+  for (const student of students) {
+    if (student.className) classNames.add(student.className);
+  }
+  for (const assignment of assignments) {
+    if (assignment.className) classNames.add(assignment.className);
+  }
+  for (const record of records) {
+    if (record.className) classNames.add(record.className);
+  }
+
+  return Array.from(classNames)
+    .filter((className) => !selectedClassName || className === selectedClassName)
+    .sort((left, right) => left.localeCompare(right, 'zh-CN'))
+    .map((className) => {
+      const classRecords = records.filter((record) => record.className === className);
+      const submittedCount = classRecords.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length;
+      return {
+        className,
+        studentCount: students.filter((student) => student.className === className).length,
+        assignmentCount: assignments.filter((assignment) => assignment.className === className).length,
+        recordCount: classRecords.length,
+        submittedCount,
+        pendingCount: classRecords.length - submittedCount,
+        completionRate: percentage(submittedCount, classRecords.length)
+      };
+    });
+}
+
+function buildLatestHomeworkAssignment(db, assignment, records) {
+  const assignmentRecords = records.filter((record) => Number(record.assignmentId) === Number(assignment.id));
+  return {
+    id: assignment.id,
+    homeworkName: assignment.homeworkName,
+    className: assignment.className,
+    dueDate: assignment.dueDate || '',
+    createdAt: assignment.createdAt || '',
+    ...completionStats(assignmentRecords),
+    missingStudents: assignmentRecords
+      .filter((record) => !isHomeworkSubmittedStatus(record.submitStatus))
+      .map((record) => ({
+        studentId: record.studentId,
+        studentName: db.students.find((student) => Number(student.id) === Number(record.studentId))?.name || `#${record.studentId}`,
+        studentPhone: db.students.find((student) => Number(student.id) === Number(record.studentId))?.phone || '',
+        className: record.className || ''
+      }))
+  };
+}
+
+function completionStats(records) {
+  const submittedCount = records.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length;
+  return {
+    totalCount: records.length,
+    submittedCount,
+    pendingCount: records.length - submittedCount,
+    completionRate: percentage(submittedCount, records.length)
+  };
+}
+
+function percentage(part, total) {
+  if (!total) return 0;
+  return Math.round((part / total) * 100);
+}
+
+function withHomeworkStudent(db, record) {
+  const student = db.students.find((item) => item.id === record.studentId);
+  return {
+    ...record,
+    studentName: student?.name || '',
+    studentPhone: student?.phone || ''
+  };
+}
+
 function clearExpiredSessions(sessions) {
   const now = Date.now();
   for (const [token, session] of sessions.entries()) {
     if (session.expiresAt <= now) sessions.delete(token);
   }
 }
+
+function assertAllowedHomeworkFile(fileName, content, maxBytes) {
+  const extension = path.extname(fileName).toLowerCase();
+  if (!ALLOWED_HOMEWORK_FILE_EXTENSIONS.has(extension)) {
+    throw new Error('unsupported homework file type');
+  }
+  if (!content.length) {
+    throw new Error('homework file is required');
+  }
+  if (content.length > maxBytes) {
+    throw createHttpError('homework file too large', 413);
+  }
+}
+
+function inferHomeworkFileType(fileName) {
+  const extension = path.extname(fileName).toLowerCase();
+  const types = {
+    '.txt': 'text/plain; charset=utf-8'
+  };
+  return types[extension] || 'application/octet-stream';
+}
+
+function sanitizeFileName(fileName) {
+  const text = String(fileName || '').trim() || '未命名';
+  return text.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 120);
+}
+
+function removeStoredHomeworkFile(record, uploadRoot) {
+  if (!record.filePath) return;
+  const resolvedFile = path.resolve(record.filePath);
+  const resolvedRoot = path.resolve(uploadRoot);
+  if (!resolvedFile.startsWith(`${resolvedRoot}${path.sep}`)) return;
+  if (fs.existsSync(resolvedFile)) {
+    fs.unlinkSync(resolvedFile);
+  }
+}
+
+function statusLabel(status) {
+  const labels = {
+    pending: '待提交',
+    submitted: '已提交',
+    reviewed: '已提交'
+  };
+  return labels[status] || status || '';
+}
+
+function createZip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const { time, date } = dosDateTime(new Date());
+
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, 'utf8');
+    const data = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data || '');
+    const crc = crc32(data);
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt16LE(time, 10);
+    localHeader.writeUInt16LE(date, 12);
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(data.length, 18);
+    localHeader.writeUInt32LE(data.length, 22);
+    localHeader.writeUInt16LE(name.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    localParts.push(localHeader, name, data);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(time, 12);
+    centralHeader.writeUInt16LE(date, 14);
+    centralHeader.writeUInt32LE(crc, 16);
+    centralHeader.writeUInt32LE(data.length, 20);
+    centralHeader.writeUInt32LE(data.length, 24);
+    centralHeader.writeUInt16LE(name.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+    centralParts.push(centralHeader, name);
+
+    offset += localHeader.length + name.length + data.length;
+  }
+
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, centralDirectory, end]);
+}
+
+function dosDateTime(dateValue) {
+  const year = Math.max(dateValue.getFullYear(), 1980);
+  return {
+    time: (dateValue.getHours() << 11) | (dateValue.getMinutes() << 5) | Math.floor(dateValue.getSeconds() / 2),
+    date: ((year - 1980) << 9) | ((dateValue.getMonth() + 1) << 5) | dateValue.getDate()
+  };
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+const CRC32_TABLE = Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  }
+  return value >>> 0;
+});
 
 function confirmInterviewSchedule(db, id, input, confirmedByRole) {
   const schedule = db.interviewSchedules.find((item) => item.id === id);
@@ -594,6 +1240,12 @@ function recordLoginFailure(loginFailures, username) {
 function createCodedError(message, code) {
   const error = new Error(message);
   error.code = code;
+  return error;
+}
+
+function createHttpError(message, statusCode) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
   return error;
 }
 

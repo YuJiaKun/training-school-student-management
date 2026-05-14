@@ -9,6 +9,12 @@ const ERROR_TEXT_MAP = {
   'name and phone are required': '请填写学生姓名和手机号',
   'student not found': '未找到对应学生',
   'homework record not found': '未找到对应作业记录',
+  'homework assignment not found': '未找到对应作业任务',
+  'homework name and class are required': '请填写作业名称和班级',
+  'homework file is required': '请选择要上传的作业文件',
+  'homework file not found': '未找到已上传的作业文件',
+  'unsupported homework file type': '仅支持上传 TXT 文件',
+  'homework file too large': '作业文件过大，请压缩或拆分后再上传',
   'interview record not found': '未找到对应面试记录',
   'schedule not found': '未找到对应面试安排',
   'schedule fields are required': '请完整填写面试安排信息',
@@ -95,10 +101,35 @@ export function apiPatch(path, body) {
   return request('PATCH', path, body);
 }
 
+export async function apiUpload(path, formData) {
+  const options = {
+    method: 'POST',
+    credentials: 'include',
+    body: formData
+  };
+
+  let response;
+  try {
+    response = await fetch(path, options);
+  } catch {
+    throw new Error('网络连接失败，请确认服务已启动');
+  }
+
+  const payload = await parsePayload(response);
+  if (!response.ok) {
+    const sessionExpired = response.status === 401;
+    if (sessionExpired) notifyAuthExpired();
+    throw new Error(sessionExpired ? LOGIN_EXPIRED_TEXT : toDisplayError(payload?.error || response.statusText));
+  }
+
+  return payload;
+}
+
 export const api = {
   get: apiGet,
   post: apiPost,
-  patch: apiPatch
+  patch: apiPatch,
+  upload: apiUpload
 };
 
 export { AUTH_EXPIRED_EVENT, LOGIN_EXPIRED_TEXT };

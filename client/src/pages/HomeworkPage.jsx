@@ -1,100 +1,139 @@
 import { useEffect, useMemo, useState } from 'react';
-import { apiGet, apiPatch, apiPost } from '../api.js';
+import { apiGet, apiPost } from '../api.js';
 import StatusBadge from '../components/StatusBadge.jsx';
 import { buildPath } from '../utils/url.js';
 
-const emptyForm = {
-  studentId: '',
+const emptyAssignmentForm = {
   homeworkName: '',
   className: '',
-  submitStatus: 'pending',
-  submitAt: '',
-  reviewResult: '',
-  remark: ''
+  dueDate: '',
+  description: ''
 };
 
+function percent(part, total) {
+  if (!total) return '0%';
+  return `${Math.round((part / total) * 100)}%`;
+}
+
+function formatDateTime(value) {
+  if (!value) return '-';
+  return value.replace('T', ' ').slice(0, 16);
+}
+
+function formatFileSize(value) {
+  const size = Number(value || 0);
+  if (!size) return '-';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function homeworkStatusText(status) {
+  if (status === 'submitted' || status === 'reviewed') return '已提交';
+  if (status === 'pending') return '待提交';
+  return status || '未知';
+}
+
+function readPendingAssignmentId() {
+  const key = 'homework:selectedAssignmentId';
+  const value = window.sessionStorage.getItem(key) || '';
+  if (value) window.sessionStorage.removeItem(key);
+  return value;
+}
+
 export default function HomeworkPage() {
+  const [assignments, setAssignments] = useState([]);
+  const [classes, setClasses] = useState([]);
   const [records, setRecords] = useState([]);
-  const [students, setStudents] = useState([]);
+  const [selectedAssignmentId, setSelectedAssignmentId] = useState('');
   const [submitStatus, setSubmitStatus] = useState('');
-  const [form, setForm] = useState(emptyForm);
-  const [editingId, setEditingId] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [keyword, setKeyword] = useState('');
+  const [form, setForm] = useState(emptyAssignmentForm);
+  const [loadingAssignments, setLoadingAssignments] = useState(false);
+  const [loadingRecords, setLoadingRecords] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
 
-  const filters = useMemo(() => ({ submitStatus }), [submitStatus]);
-  const exportUrl = buildPath('/api/export/homework', filters);
-  const studentNameById = useMemo(() => {
-    return new Map(students.map((student) => [Number(student.id), student.name]));
-  }, [students]);
+  const selectedAssignment = useMemo(() => {
+    return assignments.find((assignment) => String(assignment.id) === String(selectedAssignmentId)) || null;
+  }, [assignments, selectedAssignmentId]);
+  const recordFilters = useMemo(() => ({
+    assignmentId: selectedAssignmentId,
+    submitStatus,
+    keyword
+  }), [selectedAssignmentId, submitStatus, keyword]);
+  const exportCsvUrl = buildPath('/api/export/homework', recordFilters);
+  const exportZipUrl = selectedAssignment ? `/api/export/homework/${selectedAssignment.id}.zip` : '';
 
-  async function loadData() {
-    setLoading(true);
+  async function loadAssignments(preferredId = '') {
+    setLoadingAssignments(true);
     setError('');
     try {
-      const [recordData, studentData] = await Promise.all([
-        apiGet(buildPath('/api/homework', filters)),
-        apiGet('/api/students?pageSize=1000')
+      const [assignmentData, classData] = await Promise.all([
+        apiGet('/api/homework-assignments'),
+        apiGet('/api/classes')
       ]);
-      setRecords(recordData.items || []);
-      setStudents(studentData.items || []);
+      const items = assignmentData.items || [];
+      setAssignments(items);
+      setClasses(classData.items || []);
+      const nextId = preferredId || readPendingAssignmentId() || selectedAssignmentId || items[0]?.id || '';
+      setSelectedAssignmentId(nextId ? String(nextId) : '');
     } catch (err) {
-      setError(err.message || '作业数据加载失败');
+      setError(err.message || '作业任务加载失败');
     } finally {
-      setLoading(false);
+      setLoadingAssignments(false);
+    }
+  }
+
+  async function loadRecords() {
+    if (!selectedAssignmentId) {
+      setRecords([]);
+      return;
+    }
+    setLoadingRecords(true);
+    setError('');
+    try {
+      const data = await apiGet(buildPath('/api/homework', recordFilters));
+      setRecords(data.items || []);
+    } catch (err) {
+      setError(err.message || '作业提交明细加载失败');
+    } finally {
+      setLoadingRecords(false);
     }
   }
 
   useEffect(() => {
-    loadData();
-  }, [filters]);
+    loadAssignments();
+  }, []);
+
+  useEffect(() => {
+    loadRecords();
+  }, [recordFilters]);
 
   function updateForm(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
-  function startEdit(record) {
-    setEditingId(record.id);
-    setForm({
-      studentId: String(record.studentId || ''),
-      homeworkName: record.homeworkName || '',
-      className: record.className || '',
-      submitStatus: record.submitStatus || 'pending',
-      submitAt: record.submitAt || '',
-      reviewResult: record.reviewResult || '',
-      remark: record.remark || ''
-    });
-  }
-
-  function resetForm() {
-    setEditingId(null);
-    setForm(emptyForm);
-  }
-
-  async function handleSubmit(event) {
+  async function handleCreateAssignment(event) {
     event.preventDefault();
+    setCreating(true);
     setError('');
+    setMessage('');
     try {
-      const payload = { ...form, studentId: Number(form.studentId) };
-      if (editingId) {
-        await apiPatch(`/api/homework/${editingId}`, payload);
-      } else {
-        await apiPost('/api/homework', payload);
-      }
-      resetForm();
-      await loadData();
+      const created = await apiPost('/api/homework-assignments', {
+        homeworkName: form.homeworkName.trim(),
+        className: form.className.trim(),
+        dueDate: form.dueDate,
+        description: form.description.trim()
+      });
+      setForm(emptyAssignmentForm);
+      setMessage(`已发布作业，并生成 ${created.records?.length || 0} 条待提交记录`);
+      await loadAssignments(created.assignment?.id);
     } catch (err) {
-      setError(err.message || '作业记录保存失败');
-    }
-  }
-
-  async function updateRecord(record, patch) {
-    setError('');
-    try {
-      await apiPatch(`/api/homework/${record.id}`, patch);
-      await loadData();
-    } catch (err) {
-      setError(err.message || '作业状态更新失败');
+      setError(err.message || '发布作业失败');
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -102,86 +141,145 @@ export default function HomeworkPage() {
     <section className="admin-page homework-page">
       <div className="page-header">
         <div>
-          <p className="page-kicker">教学跟进</p>
-          <h1>作业管理</h1>
-          <p className="page-description">记录作业提交状态、提交时间和批改结果，帮助老师跟进待处理学生。</p>
+          <p className="page-kicker">作业提交</p>
+          <h1>作业跟进</h1>
+          <p className="page-description">按班级发布作业，查看谁已提交、谁未提交，并将学生原始文件打包导出。</p>
         </div>
-        <a className="button button-secondary" href={exportUrl}>导出 CSV</a>
-      </div>
-
-      <div className="toolbar">
-        <select value={submitStatus} onChange={(event) => setSubmitStatus(event.target.value)}>
-          <option value="">全部提交状态</option>
-          <option value="pending">待提交</option>
-          <option value="submitted">已提交</option>
-          <option value="reviewed">已批改</option>
-        </select>
+        <div className="form-actions">
+          <a className="button button-secondary" href={exportCsvUrl}>导出清单 CSV</a>
+          {selectedAssignment ? <a className="button button-primary" href={exportZipUrl}>批量导出 ZIP</a> : null}
+        </div>
       </div>
 
       {error ? <div className="alert alert-error">{error}</div> : null}
+      {message ? <div className="alert alert-success">{message}</div> : null}
 
-      <form className="panel form-grid" onSubmit={handleSubmit}>
-        <h2>{editingId ? '编辑作业记录' : '新增作业记录'}</h2>
-        <select required value={form.studentId} onChange={(event) => updateForm('studentId', event.target.value)}>
-          <option value="">选择学生</option>
-          {students.map((student) => (
-            <option key={student.id} value={student.id}>{student.name} · {student.className || '未分班'}</option>
-          ))}
-        </select>
-        <input required value={form.homeworkName} onChange={(event) => updateForm('homeworkName', event.target.value)} placeholder="作业名称" />
-        <input value={form.className} onChange={(event) => updateForm('className', event.target.value)} placeholder="班级/课程" />
-        <select value={form.submitStatus} onChange={(event) => updateForm('submitStatus', event.target.value)}>
-          <option value="pending">待提交</option>
-          <option value="submitted">已提交</option>
-          <option value="reviewed">已批改</option>
-        </select>
-        <input type="date" value={form.submitAt} onChange={(event) => updateForm('submitAt', event.target.value)} />
-        <input value={form.reviewResult} onChange={(event) => updateForm('reviewResult', event.target.value)} placeholder="批改结果" />
-        <textarea value={form.remark} onChange={(event) => updateForm('remark', event.target.value)} placeholder="备注" />
+      <form className="panel form-grid" onSubmit={handleCreateAssignment}>
+        <h2>发布新作业</h2>
+        <label>
+          作业名称
+          <input required value={form.homeworkName} onChange={(event) => updateForm('homeworkName', event.target.value)} placeholder="例如：第1周 HTML 作业" />
+        </label>
+        <label>
+          班级/课程
+          <input required list="homework-class-options" value={form.className} onChange={(event) => updateForm('className', event.target.value)} placeholder="选择或输入班级" />
+          <datalist id="homework-class-options">
+            {classes.map((item) => (
+              <option key={item.className} value={item.className}>{item.studentCount} 名在读学生</option>
+            ))}
+          </datalist>
+        </label>
+        <label>
+          截止日期
+          <input type="date" value={form.dueDate} onChange={(event) => updateForm('dueDate', event.target.value)} />
+        </label>
+        <label className="form-wide">
+          作业说明
+          <textarea value={form.description} onChange={(event) => updateForm('description', event.target.value)} placeholder="说明提交要求，例如：上传 TXT 文件。" />
+        </label>
         <div className="form-actions">
-          <button className="button button-primary" type="submit">{editingId ? '保存修改' : '新增作业记录'}</button>
-          {editingId ? <button className="button button-secondary" type="button" onClick={resetForm}>取消编辑</button> : null}
+          <button className="button button-primary" type="submit" disabled={creating}>{creating ? '正在发布...' : '发布并生成待提交名单'}</button>
+          <span className="muted">系统会为该班级所有在读学生生成待提交记录。</span>
         </div>
       </form>
 
-      <div className="table-summary">{loading ? '正在加载作业...' : `共 ${records.length} 条作业记录`}</div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>作业名称</th>
-              <th>学生</th>
-              <th>班级/课程</th>
-              <th>提交状态</th>
-              <th>提交时间</th>
-              <th>批改结果</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {records.map((record) => (
-              <tr key={record.id}>
-                <td>{record.homeworkName || '-'}</td>
-                <td>{studentNameById.get(Number(record.studentId)) || `#${record.studentId}`}</td>
-                <td>{record.className || '-'}</td>
-                <td><StatusBadge status={record.submitStatus} /></td>
-                <td>{record.submitAt || '-'}</td>
-                <td>{record.reviewResult ? <StatusBadge status={record.reviewResult} /> : '-'}</td>
-                <td className="table-actions">
-                  <button type="button" onClick={() => startEdit(record)}>编辑</button>
-                  <button type="button" onClick={() => updateRecord(record, { submitStatus: 'submitted', submitAt: new Date().toISOString().slice(0, 10) })}>标记提交</button>
-                  <button type="button" onClick={() => updateRecord(record, { submitStatus: 'reviewed', reviewResult: record.reviewResult || '已批改' })}>标记批改</button>
-                </td>
-              </tr>
+      <section className="assignment-board">
+        <div className="panel assignment-list-panel">
+          <div className="panel-header">
+            <h2>作业任务</h2>
+            <span>{loadingAssignments ? '加载中...' : `${assignments.length} 个任务`}</span>
+          </div>
+          {!assignments.length && !loadingAssignments ? <div className="empty-state">暂无作业任务，先发布一个作业。</div> : null}
+          <div className="assignment-list">
+            {assignments.map((assignment) => (
+              <button
+                className={String(assignment.id) === String(selectedAssignmentId) ? 'assignment-card is-active' : 'assignment-card'}
+                type="button"
+                key={assignment.id}
+                onClick={() => setSelectedAssignmentId(String(assignment.id))}
+              >
+                <strong>{assignment.homeworkName}</strong>
+                <span>{assignment.className} / 截止 {assignment.dueDate || '未设置'}</span>
+                <small>
+                  已交 {assignment.submittedCount}/{assignment.totalCount}
+                  <b>{percent(assignment.submittedCount, assignment.totalCount)}</b>
+                </small>
+              </button>
             ))}
-            {!records.length && !loading ? (
-              <tr>
-                <td colSpan="7" className="empty-cell">暂无作业记录</td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
+          </div>
+        </div>
+
+        <div className="panel assignment-detail-panel">
+          <div className="panel-header">
+            <div>
+              <h2>{selectedAssignment?.homeworkName || '提交明细'}</h2>
+              <p className="muted">
+                {selectedAssignment
+                  ? `${selectedAssignment.className}：已交 ${selectedAssignment.submittedCount} 人，未交 ${selectedAssignment.pendingCount} 人`
+                  : '选择一个作业任务后查看学生提交情况。'}
+              </p>
+            </div>
+          </div>
+
+          <div className="toolbar">
+            <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="搜索学生姓名或手机号" />
+            <select value={submitStatus} onChange={(event) => setSubmitStatus(event.target.value)}>
+              <option value="">全部提交状态</option>
+              <option value="pending">待提交</option>
+              <option value="submitted">已提交</option>
+            </select>
+          </div>
+
+          <div className="table-summary">{loadingRecords ? '正在加载提交明细...' : `当前筛选 ${records.length} 条记录`}</div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>学生</th>
+                  <th>手机号</th>
+                  <th>状态</th>
+                  <th>提交时间</th>
+                  <th>文件</th>
+                  <th>备注</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {records.map((record) => (
+                  <tr key={record.id}>
+                    <td>{record.studentName || `#${record.studentId}`}</td>
+                    <td>{record.studentPhone || '-'}</td>
+                    <td>
+                      <StatusBadge status={record.submitStatus === 'reviewed' ? 'submitted' : record.submitStatus}>
+                        {homeworkStatusText(record.submitStatus)}
+                      </StatusBadge>
+                    </td>
+                    <td>{formatDateTime(record.submitAt)}</td>
+                    <td>
+                      {record.fileName ? (
+                        <>
+                          <strong>{record.fileName}</strong>
+                          <span className="cell-subtext">{formatFileSize(record.fileSize)}</span>
+                        </>
+                      ) : '-'}
+                    </td>
+                    <td>{record.remark || '-'}</td>
+                    <td className="table-actions">
+                      {record.fileName ? <a href={`/api/homework/${record.id}/file`}>下载</a> : <span className="muted">未提交</span>}
+                      <a href={`/api/export/homework/student/${record.studentId}.zip`}>导出该生</a>
+                    </td>
+                  </tr>
+                ))}
+                {!records.length && !loadingRecords ? (
+                  <tr>
+                    <td colSpan="7" className="empty-cell">暂无提交记录</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </section>
   );
 }

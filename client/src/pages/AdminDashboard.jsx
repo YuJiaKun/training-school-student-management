@@ -107,7 +107,7 @@ export default function AdminDashboard() {
         </article>
         <article className="quick-entry">
           <h2>作业跟进</h2>
-          <p>跟进提交状态和批改结果，帮助老师定位待处理作业。</p>
+          <p>跟进提交状态和缺交名单，帮助老师快速导出学生原始作业文件。</p>
         </article>
         <article className="quick-entry">
           <h2>面试记录</h2>

@@ -3,7 +3,7 @@ export const STATUS_LABELS = {
   archived: '已归档',
   pending: '待处理',
   submitted: '已提交',
-  reviewed: '已批改',
+  reviewed: '已提交',
   passed: '通过',
   failed: '未通过',
   hired: '已入职',

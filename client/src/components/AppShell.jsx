@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import AdminDashboard from '../pages/AdminDashboard.jsx';
 import AdminScheduleQueue from '../pages/AdminScheduleQueue.jsx';
+import HomeworkAnalyticsPage from '../pages/HomeworkAnalyticsPage.jsx';
 import HomeworkPage from '../pages/HomeworkPage.jsx';
 import InterviewsPage from '../pages/InterviewsPage.jsx';
 import SchedulesPage from '../pages/SchedulesPage.jsx';
@@ -18,7 +19,8 @@ export const ROLE_TEXT = {
 const NAV_ITEMS = [
   { key: 'dashboard', label: '工作台', roles: ['admin', 'teacher', 'student'] },
   { key: 'students', label: '学生管理', roles: ['admin'] },
-  { key: 'homework', label: '作业跟进', roles: ['admin'] },
+  { key: 'homework', label: '作业跟进', roles: ['admin', 'teacher'] },
+  { key: 'homework-analytics', label: '作业大屏', roles: ['admin', 'teacher'] },
   { key: 'interviews', label: '面试记录', roles: ['admin'] },
   { key: 'schedules', label: '排期总览', roles: ['admin', 'teacher', 'student'] },
   { key: 'schedule-queue', label: '排期审批', roles: ['admin'] }
@@ -83,6 +85,7 @@ export default function AppShell({ user, onLogout }) {
 function RouteView({ route, user }) {
   if (route === 'students') return <StudentsPage />;
   if (route === 'homework') return <HomeworkPage />;
+  if (route === 'homework-analytics') return <HomeworkAnalyticsPage />;
   if (route === 'interviews') return <InterviewsPage />;
   if (route === 'schedules') return <SchedulesPage />;
   if (route === 'schedule-queue') return <AdminScheduleQueue />;

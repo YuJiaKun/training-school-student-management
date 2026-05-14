@@ -53,6 +53,10 @@ function jsonHeaders(cookie) {
   return { 'content-type': 'application/json', cookie };
 }
 
+function createUploadRoot() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'homework-uploads-'));
+}
+
 test('student lifecycle supports create, archive, query, stats, and export', () => {
   const db = createDatabase();
   const app = createApp({ db });
@@ -133,13 +137,15 @@ test('homework and interview records can be listed, filtered, updated, and expor
   const app = createApp({ db: createDatabase() });
   const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
   const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: 'Java1班' });
+  const charlie = app.createStudent({ name: 'Charlie', phone: '13800000003', className: '前端1班' });
 
   app.addHomeworkRecord({ studentId: alice.id, homeworkName: 'HTML作业', className: '前端1班', submitStatus: 'submitted', submitAt: '2026-05-08', reviewResult: 'passed', remark: '' });
   app.addHomeworkRecord({ studentId: bob.id, homeworkName: 'SQL作业', className: 'Java1班', submitStatus: 'pending', submitAt: '', reviewResult: '', remark: '' });
+  app.addHomeworkRecord({ studentId: charlie.id, homeworkName: 'Legacy作业', className: '前端1班', submitStatus: 'reviewed', submitAt: '2026-05-08', reviewResult: 'passed', remark: '' });
   app.addInterviewRecord({ studentId: alice.id, companyName: 'A公司', positionName: '前端工程师', interviewAt: '2026-05-09', result: 'passed', feedback: '表现稳定', hiredStatus: 'hired', remark: '' });
   app.addInterviewRecord({ studentId: bob.id, companyName: 'B公司', positionName: 'Java工程师', interviewAt: '2026-05-10', result: 'failed', feedback: '基础薄弱', hiredStatus: 'not_hired', remark: '' });
 
-  assert.equal(app.listHomeworkRecords({ submitStatus: 'submitted' }).total, 1);
+  assert.equal(app.listHomeworkRecords({ submitStatus: 'submitted' }).total, 2);
   assert.equal(app.listInterviewRecords({ result: 'failed' }).items[0].companyName, 'B公司');
 
   await withServer(app, async (baseUrl) => {
@@ -164,6 +170,234 @@ test('homework and interview records can be listed, filtered, updated, and expor
     assert.equal(updatedInterview.record.hiredStatus, 'hired');
     assert.match(homeworkCsv, /HTML作业/);
     assert.match(interviewCsv, /A公司/);
+  });
+});
+
+test('homework assignments create student submission records and export original files as zip', () => {
+  const uploadRoot = createUploadRoot();
+  const app = createApp({ db: createDatabase(), uploadRoot });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: '前端1班' });
+  app.createStudent({ name: 'Charlie', phone: '13800000003', className: 'Java1班' });
+
+  const created = app.createHomeworkAssignment({
+    homeworkName: '第1周作业',
+    className: '前端1班',
+    dueDate: '2026-05-20',
+    description: '上传 txt 文件'
+  });
+
+  assert.equal(created.assignment.homeworkName, '第1周作业');
+  assert.equal(created.records.length, 2);
+  assert.deepEqual(created.records.map((record) => record.studentId).sort((left, right) => left - right), [alice.id, bob.id]);
+
+  const aliceRecord = created.records.find((record) => record.studentId === alice.id);
+  const updated = app.submitHomeworkFile(aliceRecord.id, {
+    studentId: alice.id,
+    fileName: 'alice-homework.txt',
+    contentType: 'text/plain',
+    content: Buffer.from('Alice answer', 'utf8'),
+    remark: '已完成'
+  });
+  const assignments = app.listHomeworkAssignments().items;
+  const zip = app.exportHomeworkAssignmentZip(created.assignment.id);
+
+  assert.equal(updated.submitStatus, 'submitted');
+  assert.equal(updated.fileName, 'alice-homework.txt');
+  assert.equal(fs.readFileSync(updated.filePath, 'utf8'), 'Alice answer');
+  assert.equal(assignments[0].submittedCount, 1);
+  assert.equal(assignments[0].pendingCount, 1);
+  assert.equal(zip.contentType, 'application/zip');
+  assert.equal(zip.fileName, '第1周作业-作业提交.zip');
+  assert.equal(zip.body.subarray(0, 2).toString('utf8'), 'PK');
+  assert.match(zip.body.toString('utf8'), /alice-homework\.txt/);
+  assert.match(zip.body.toString('utf8'), /提交清单\.csv/);
+});
+
+test('student homework upload endpoint only accepts own txt submission and exposes downloads', async () => {
+  const uploadRoot = createUploadRoot();
+  const db = createDatabase();
+  const app = createApp({
+    db,
+    uploadRoot,
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1 },
+      { username: 'student-a', password: 'student123', role: 'student', studentId: 1 },
+      { username: 'student-b', password: 'student123', role: 'student', studentId: 2 }
+    ]
+  });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: '前端1班' });
+
+  await withServer(app, async (baseUrl) => {
+    const teacherCookie = await loginAs(baseUrl, 'teacher', 'teacher123');
+    const studentCookie = await loginAs(baseUrl, 'student-a', 'student123');
+    const otherStudentCookie = await loginAs(baseUrl, 'student-b', 'student123');
+
+    const created = await fetch(`${baseUrl}/api/homework-assignments`, {
+      method: 'POST',
+      headers: jsonHeaders(teacherCookie),
+      body: JSON.stringify({
+        homeworkName: '第2周作业',
+        className: '前端1班',
+        dueDate: '2026-05-27',
+        description: '请上传 TXT 文件'
+      })
+    }).then((response) => response.json());
+    const aliceRecord = created.records.find((record) => record.studentId === alice.id);
+    const bobRecord = created.records.find((record) => record.studentId === bob.id);
+
+    const rejectedFile = new FormData();
+    rejectedFile.append('file', new Blob(['bad'], { type: 'application/javascript' }), 'bad.js');
+    const rejected = await fetch(`${baseUrl}/api/homework/${aliceRecord.id}/submission`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: rejectedFile
+    });
+
+    const rejectedWordFile = new FormData();
+    rejectedWordFile.append('file', new Blob(['word'], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }), 'homework.docx');
+    const rejectedWord = await fetch(`${baseUrl}/api/homework/${aliceRecord.id}/submission`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: rejectedWordFile
+    });
+
+    const forbiddenFile = new FormData();
+    forbiddenFile.append('file', new Blob(['wrong student'], { type: 'text/plain' }), 'wrong.txt');
+    const forbidden = await fetch(`${baseUrl}/api/homework/${bobRecord.id}/submission`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: forbiddenFile
+    });
+
+    const form = new FormData();
+    form.append('remark', '我的作业');
+    form.append('file', new Blob(['Alice document'], { type: 'text/plain' }), 'alice.txt');
+    const submitted = await fetch(`${baseUrl}/api/homework/${aliceRecord.id}/submission`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: form
+    }).then((response) => response.json());
+    const fileResponse = await fetch(`${baseUrl}/api/homework/${aliceRecord.id}/file`, { headers: { cookie: teacherCookie } });
+    const downloaded = await fileResponse.text();
+    const deniedDownload = await fetch(`${baseUrl}/api/homework/${aliceRecord.id}/file`, { headers: { cookie: otherStudentCookie } });
+    const zipResponse = await fetch(`${baseUrl}/api/export/homework/${created.assignment.id}.zip`, { headers: { cookie: teacherCookie } });
+    const zip = Buffer.from(await zipResponse.arrayBuffer());
+
+    assert.equal(rejected.status, 400);
+    assert.equal(rejectedWord.status, 400);
+    assert.equal(forbidden.status, 403);
+    assert.equal(submitted.record.submitStatus, 'submitted');
+    assert.equal(submitted.record.fileName, 'alice.txt');
+    assert.equal(fileResponse.headers.get('content-type'), 'text/plain; charset=utf-8');
+    assert.equal(downloaded, 'Alice document');
+    assert.equal(deniedDownload.status, 403);
+    assert.equal(zipResponse.headers.get('content-type'), 'application/zip');
+    assert.match(zip.toString('utf8'), /alice\.txt/);
+    assert.match(zip.toString('utf8'), /提交清单\.csv/);
+  });
+});
+
+test('homework student zip export includes only one student files and summary', () => {
+  const uploadRoot = createUploadRoot();
+  const app = createApp({ db: createDatabase(), uploadRoot });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend1' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: 'Frontend1' });
+  const charlie = app.createStudent({ name: 'Charlie', phone: '13800000003', className: 'Frontend1' });
+  const created = app.createHomeworkAssignment({
+    homeworkName: 'Week 1',
+    className: 'Frontend1',
+    dueDate: '2026-05-27',
+    description: 'Upload TXT'
+  });
+
+  const aliceRecord = created.records.find((record) => record.studentId === alice.id);
+  const bobRecord = created.records.find((record) => record.studentId === bob.id);
+  app.submitHomeworkFile(aliceRecord.id, {
+    studentId: alice.id,
+    fileName: 'alice.txt',
+    content: Buffer.from('Alice answer', 'utf8')
+  });
+  app.submitHomeworkFile(bobRecord.id, {
+    studentId: bob.id,
+    fileName: 'bob.txt',
+    content: Buffer.from('Bob answer', 'utf8')
+  });
+
+  const aliceZip = app.exportHomeworkStudentZip(alice.id);
+  const aliceZipText = aliceZip.body.toString('utf8');
+  const charlieZip = app.exportHomeworkStudentZip(charlie.id);
+  const charlieZipText = charlieZip.body.toString('utf8');
+
+  assert.equal(aliceZip.contentType, 'application/zip');
+  assert.match(aliceZip.fileName, /Alice/);
+  assert.match(aliceZipText, /alice\.txt/);
+  assert.match(aliceZipText, /Alice answer/);
+  assert.match(aliceZipText, /提交清单\.csv/);
+  assert.doesNotMatch(aliceZipText, /bob\.txt/);
+  assert.doesNotMatch(aliceZipText, /Bob answer/);
+  assert.match(charlieZipText, /提交清单\.csv/);
+  assert.doesNotMatch(charlieZipText, /alice\.txt|bob\.txt/);
+});
+
+test('homework analytics summarizes overview classes assignments and students', async () => {
+  const app = createApp({ db: createDatabase() });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend1' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: 'Frontend1' });
+  const charlie = app.createStudent({ name: 'Charlie', phone: '13800000003', className: 'Java1' });
+  app.archiveStudent(app.createStudent({ name: 'Archived', phone: '13800000004', className: 'Frontend1' }).id);
+
+  const frontendWeek1 = app.createHomeworkAssignment({ homeworkName: 'Frontend Week 1', className: 'Frontend1', dueDate: '2026-05-20' });
+  const frontendWeek2 = app.createHomeworkAssignment({ homeworkName: 'Frontend Week 2', className: 'Frontend1', dueDate: '2026-05-27' });
+  const javaWeek1 = app.createHomeworkAssignment({ homeworkName: 'Java Week 1', className: 'Java1', dueDate: '2026-05-21' });
+
+  const aliceWeek1 = frontendWeek1.records.find((record) => record.studentId === alice.id);
+  const bobWeek1 = frontendWeek1.records.find((record) => record.studentId === bob.id);
+  const charlieWeek1 = javaWeek1.records.find((record) => record.studentId === charlie.id);
+  app.updateHomeworkRecord(aliceWeek1.id, { submitStatus: 'submitted', submitAt: '2026-05-18T09:00:00' });
+  app.updateHomeworkRecord(bobWeek1.id, { submitStatus: 'reviewed', submitAt: '2026-05-18T10:00:00' });
+  app.updateHomeworkRecord(charlieWeek1.id, { submitStatus: 'submitted', submitAt: '2026-05-19T09:00:00' });
+
+  const analytics = app.getHomeworkAnalytics();
+  const frontendOnly = app.getHomeworkAnalytics({ className: 'Frontend1' });
+  const latest = analytics.latestAssignment;
+
+  assert.equal(analytics.overview.studentCount, 3);
+  assert.equal(analytics.overview.assignmentCount, 3);
+  assert.equal(analytics.overview.recordCount, 5);
+  assert.equal(analytics.overview.submittedCount, 3);
+  assert.equal(analytics.overview.pendingCount, 2);
+  assert.equal(analytics.overview.completionRate, 60);
+  assert.equal(analytics.classes.find((item) => item.className === 'Frontend1').studentCount, 2);
+  assert.equal(analytics.classes.find((item) => item.className === 'Frontend1').completionRate, 50);
+  assert.equal(analytics.assignments.find((item) => item.id === frontendWeek1.assignment.id).completionRate, 100);
+  assert.equal(analytics.students.find((item) => item.studentId === alice.id).completionRate, 50);
+  assert.equal(analytics.students.find((item) => item.studentId === bob.id).completionRate, 50);
+  assert.equal(latest.id, javaWeek1.assignment.id);
+  assert.equal(frontendOnly.overview.studentCount, 2);
+  assert.equal(frontendOnly.overview.assignmentCount, 2);
+  assert.equal(frontendOnly.overview.recordCount, 4);
+  assert.equal(frontendOnly.latestAssignment.id, frontendWeek2.assignment.id);
+
+  await withServer(app, async (baseUrl) => {
+    const teacherCookie = await loginAs(baseUrl, 'teacher', 'teacher123');
+    const studentCookie = await loginAs(baseUrl, 'student', 'student123');
+    const analyticsResponse = await fetch(`${baseUrl}/api/homework-analytics?className=Frontend1`, { headers: { cookie: teacherCookie } });
+    const analyticsBody = await analyticsResponse.json();
+    const studentZip = await fetch(`${baseUrl}/api/export/homework/student/${alice.id}.zip`, { headers: { cookie: teacherCookie } });
+    const unauthorizedAnalytics = await fetch(`${baseUrl}/api/homework-analytics`);
+    const forbiddenAnalytics = await fetch(`${baseUrl}/api/homework-analytics`, { headers: { cookie: studentCookie } });
+    const forbiddenStudentZip = await fetch(`${baseUrl}/api/export/homework/student/${alice.id}.zip`, { headers: { cookie: studentCookie } });
+
+    assert.equal(analyticsResponse.status, 200);
+    assert.equal(analyticsBody.overview.recordCount, 4);
+    assert.equal(studentZip.status, 200);
+    assert.equal(studentZip.headers.get('content-type'), 'application/zip');
+    assert.equal(unauthorizedAnalytics.status, 401);
+    assert.equal(forbiddenAnalytics.status, 403);
+    assert.equal(forbiddenStudentZip.status, 403);
   });
 });
 
@@ -648,13 +882,13 @@ test('database saves with schema version, backup, and explicit damaged file erro
   }));
 
   const db = createDatabase({ filePath });
-  assert.equal(db.schemaVersion, 1);
+  assert.equal(db.schemaVersion, 2);
   assert.equal(db.students[0].status, 'active');
 
   db.save();
   const saved = JSON.parse(fs.readFileSync(filePath, 'utf8'));
 
-  assert.equal(saved.schemaVersion, 1);
+  assert.equal(saved.schemaVersion, 2);
   assert.equal(fs.existsSync(`${filePath}.tmp`), false);
   assert.equal(fs.existsSync(`${filePath}.bak`), true);
 
@@ -704,5 +938,126 @@ test('student import preview validates rows and commit creates valid students', 
 
     assert.equal(commit.created.length, 2);
     assert.equal(app.listStudents().total, 2);
+  });
+});
+
+test('student import template and commit can generate bound student accounts', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1 }
+    ]
+  });
+
+  await withServer(app, async (baseUrl) => {
+    const cookie = await loginAs(baseUrl);
+    const templateResponse = await fetch(`${baseUrl}/api/students/import/template.csv`, {
+      headers: { cookie }
+    });
+    const templateBody = Buffer.from(await templateResponse.arrayBuffer());
+    const template = templateBody.toString('utf8');
+
+    assert.equal(templateResponse.status, 200);
+    assert.deepEqual([...templateBody.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+    assert.match(template, /^﻿姓名,手机号,性别,出生日期,班级\/课程,入学日期,备注/);
+
+    const commit = await fetch(`${baseUrl}/api/students/import/commit`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({
+        generateAccounts: true,
+        text: '姓名,手机号,性别,出生日期,班级/课程,入学日期,备注\nAlice,13800000001,女,2001-01-01,前端1班,2026-05-01,认真'
+      })
+    }).then((response) => response.json());
+
+    assert.equal(commit.created.length, 1);
+    assert.equal(commit.accounts.length, 1);
+    assert.equal(commit.accounts[0].username, '13800000001');
+    assert.equal(commit.accounts[0].studentId, commit.created[0].id);
+    assert.ok(commit.accounts[0].password.length >= 8);
+
+    const students = await fetch(`${baseUrl}/api/students`, {
+      headers: { cookie }
+    }).then((response) => response.json());
+    assert.equal(students.items[0].hasAccount, true);
+    assert.equal(students.items[0].accountUsername, '13800000001');
+
+    const studentCookie = await loginAs(baseUrl, commit.accounts[0].username, commit.accounts[0].password);
+    const workspace = await fetch(`${baseUrl}/api/student-workspace`, {
+      headers: { cookie: studentCookie }
+    }).then((response) => response.json());
+    assert.equal(workspace.student.name, 'Alice');
+  });
+});
+
+test('student account generation skips existing accounts and exports credentials', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' }
+    ]
+  });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: '前端1班' });
+
+  await withServer(app, async (baseUrl) => {
+    const cookie = await loginAs(baseUrl);
+
+    const first = await fetch(`${baseUrl}/api/students/accounts/generate`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({ studentIds: [alice.id] })
+    }).then((response) => response.json());
+    assert.equal(first.accounts.length, 1);
+    assert.equal(first.skippedCount, 0);
+
+    const second = await fetch(`${baseUrl}/api/students/accounts/generate`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({ studentIds: [alice.id, bob.id] })
+    }).then((response) => response.json());
+    assert.equal(second.accounts.length, 1);
+    assert.equal(second.accounts[0].studentId, bob.id);
+    assert.equal(second.skippedCount, 1);
+
+    const exportBody = await fetch(`${baseUrl}/api/export/student-accounts`, {
+      headers: { cookie }
+    }).then((response) => response.arrayBuffer());
+    const exportBuffer = Buffer.from(exportBody);
+    const exportCsv = exportBuffer.toString('utf8');
+    assert.deepEqual([...exportBuffer.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+    assert.match(exportCsv, /学生姓名,班级\/课程,手机号,用户名,初始密码/);
+    assert.match(exportCsv, /Alice,前端1班,13800000001,13800000001,/);
+    assert.match(exportCsv, /Bob,前端1班,13800000002,13800000002,/);
+  });
+});
+
+test('student account management endpoints are admin only', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1 },
+      { username: 'student-a', password: 'student123', role: 'student', studentId: 1 }
+    ]
+  });
+  app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+
+  await withServer(app, async (baseUrl) => {
+    const teacherCookie = await loginAs(baseUrl, 'teacher', 'teacher123');
+    const studentCookie = await loginAs(baseUrl, 'student-a', 'student123');
+
+    const teacherGenerate = await fetch(`${baseUrl}/api/students/accounts/generate`, {
+      method: 'POST',
+      headers: jsonHeaders(teacherCookie),
+      body: JSON.stringify({ studentIds: [1] })
+    });
+    const studentExport = await fetch(`${baseUrl}/api/export/student-accounts`, {
+      headers: { cookie: studentCookie }
+    });
+
+    assert.equal(teacherGenerate.status, 403);
+    assert.equal(studentExport.status, 403);
   });
 });

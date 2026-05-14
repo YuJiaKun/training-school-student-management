@@ -20,15 +20,20 @@ export default function StudentsPage() {
   const [status, setStatus] = useState('');
   const [form, setForm] = useState(emptyForm);
   const [importText, setImportText] = useState('');
+  const [importFileName, setImportFileName] = useState('');
   const [importPreview, setImportPreview] = useState(null);
   const [importMessage, setImportMessage] = useState('');
+  const [generateAccounts, setGenerateAccounts] = useState(true);
+  const [generatedAccounts, setGeneratedAccounts] = useState([]);
   const [editingId, setEditingId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [generatingAccounts, setGeneratingAccounts] = useState(false);
   const [error, setError] = useState('');
 
   const filters = useMemo(() => ({ keyword, status }), [keyword, status]);
   const exportUrl = buildPath('/api/export/students', filters);
+  const accountExportUrl = buildPath('/api/export/student-accounts', filters);
 
   async function loadStudents() {
     setLoading(true);
@@ -90,6 +95,7 @@ export default function StudentsPage() {
     event.preventDefault();
     setError('');
     setImportMessage('');
+    setGeneratedAccounts([]);
     setImporting(true);
     try {
       const preview = await apiPost('/api/students/import/preview', { text: importText });
@@ -104,17 +110,57 @@ export default function StudentsPage() {
   async function commitImport() {
     setError('');
     setImportMessage('');
+    setGeneratedAccounts([]);
     setImporting(true);
     try {
-      const result = await apiPost('/api/students/import/commit', { text: importText });
+      const result = await apiPost('/api/students/import/commit', { text: importText, generateAccounts });
       setImportPreview(result);
-      setImportMessage(`已导入 ${result.created?.length || 0} 名学生`);
+      setGeneratedAccounts(result.accounts || []);
+      const accountText = generateAccounts
+        ? `，生成 ${result.accounts?.length || 0} 个账号，跳过 ${result.skippedCount || 0} 名已有账号学生`
+        : '';
+      setImportMessage(`已导入 ${result.created?.length || 0} 名学生${accountText}`);
       setImportText('');
+      setImportFileName('');
       await loadStudents();
     } catch (err) {
       setError(err.message || '导入学生失败');
     } finally {
       setImporting(false);
+    }
+  }
+
+  async function handleImportFile(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setError('');
+    setImportMessage('');
+    setGeneratedAccounts([]);
+    try {
+      const text = await file.text();
+      setImportText(text);
+      setImportFileName(file.name);
+      setImportPreview(null);
+      setImportMessage(`已读取表格：${file.name}`);
+    } catch (err) {
+      setError(err.message || '读取表格失败');
+    }
+  }
+
+  async function generateAccountsForCurrentStudents() {
+    setError('');
+    setImportMessage('');
+    setGeneratedAccounts([]);
+    setGeneratingAccounts(true);
+    try {
+      const result = await apiPost('/api/students/accounts/generate', { filters });
+      setGeneratedAccounts(result.accounts || []);
+      setImportMessage(`已生成 ${result.accounts?.length || 0} 个账号，跳过 ${result.skippedCount || 0} 名已有账号学生`);
+      await loadStudents();
+    } catch (err) {
+      setError(err.message || '批量生成账号失败');
+    } finally {
+      setGeneratingAccounts(false);
     }
   }
 
@@ -136,7 +182,11 @@ export default function StudentsPage() {
           <h1>学生管理</h1>
           <p className="page-description">维护学生基础资料，筛选在读或归档状态，并导出当前结果。</p>
         </div>
-        <a className="button button-secondary" href={exportUrl}>导出 CSV</a>
+        <div className="form-actions">
+          <a className="button button-secondary" href="/api/students/import/template.csv" download>下载导入模板</a>
+          <a className="button button-secondary" href={exportUrl}>导出学生 CSV</a>
+          <a className="button button-secondary" href={accountExportUrl}>导出账号清单</a>
+        </div>
       </div>
 
       <div className="toolbar">
@@ -146,6 +196,9 @@ export default function StudentsPage() {
           <option value="active">在读</option>
           <option value="archived">已归档</option>
         </select>
+        <button type="button" onClick={generateAccountsForCurrentStudents} disabled={generatingAccounts || loading || !students.length}>
+          {generatingAccounts ? '正在生成账号...' : '批量生成账号'}
+        </button>
       </div>
 
       {error ? <div className="alert alert-error">{error}</div> : null}
@@ -153,15 +206,35 @@ export default function StudentsPage() {
 
       <form className="panel form-grid" onSubmit={previewImport}>
         <h2>批量导入学生</h2>
-        <textarea
-          className="form-wide"
-          value={importText}
-          onChange={(event) => {
-            setImportText(event.target.value);
-            setImportPreview(null);
-          }}
-          placeholder="粘贴 CSV 内容，例如：姓名,手机号,班级/课程"
-        />
+        <label>
+          上传学生表格
+          <input type="file" accept=".csv,text/csv,text/plain" onChange={handleImportFile} />
+        </label>
+        <label>
+          文件名称
+          <input value={importFileName || '未选择文件'} readOnly />
+        </label>
+        <label className="checkbox-field">
+          <input
+            type="checkbox"
+            checked={generateAccounts}
+            onChange={(event) => setGenerateAccounts(event.target.checked)}
+          />
+          导入后自动生成学生账号
+        </label>
+        <label className="form-wide">
+          粘贴导入内容
+          <textarea
+            value={importText}
+            onChange={(event) => {
+              setImportText(event.target.value);
+              setImportFileName('');
+              setImportPreview(null);
+              setGeneratedAccounts([]);
+            }}
+            placeholder="姓名,手机号,性别,出生日期,班级/课程,入学日期,备注"
+          />
+        </label>
         <div className="form-actions">
           <button className="button button-secondary" type="submit" disabled={importing || !importText.trim()}>预览导入</button>
           <button
@@ -184,6 +257,25 @@ export default function StudentsPage() {
                 <span>{row.errors.length ? row.errors.join('、') : '可导入'}</span>
               </div>
             ))}
+          </div>
+        ) : null}
+        {generatedAccounts.length ? (
+          <div className="account-preview form-wide">
+            <div className="panel-header">
+              <div>
+                <h3>最近生成账号</h3>
+                <p className="muted">已生成 {generatedAccounts.length} 个账号，可导出账号清单保存。</p>
+              </div>
+              <a className="button button-secondary" href={accountExportUrl}>导出账号清单</a>
+            </div>
+            <div className="account-chip-list">
+              {generatedAccounts.slice(0, 6).map((account) => (
+                <div className="account-chip" key={account.id || `${account.studentId}-${account.username}`}>
+                  <strong>{account.studentName || `学生 #${account.studentId}`}</strong>
+                  <span>{account.username} / {account.password}</span>
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
       </form>
@@ -213,6 +305,7 @@ export default function StudentsPage() {
               <th>班级/课程</th>
               <th>入学时间</th>
               <th>状态</th>
+              <th>账号</th>
               <th>备注</th>
               <th>操作</th>
             </tr>
@@ -225,6 +318,12 @@ export default function StudentsPage() {
                 <td>{student.className || '-'}</td>
                 <td>{student.enrolledAt || '-'}</td>
                 <td><StatusBadge status={student.status} /></td>
+                <td>
+                  <span className={student.hasAccount ? 'status-badge status-success' : 'status-badge status-muted'}>
+                    {student.hasAccount ? '已生成' : '未生成'}
+                  </span>
+                  {student.accountUsername ? <span className="cell-subtext">{student.accountUsername}</span> : null}
+                </td>
                 <td>{student.remark || '-'}</td>
                 <td className="table-actions">
                   <button type="button" onClick={() => startEdit(student)}>编辑</button>
@@ -234,7 +333,7 @@ export default function StudentsPage() {
             ))}
             {!students.length && !loading ? (
               <tr>
-                <td colSpan="7" className="empty-cell">暂无学生数据</td>
+                <td colSpan="8" className="empty-cell">暂无学生数据</td>
               </tr>
             ) : null}
           </tbody>
