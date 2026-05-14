@@ -89,22 +89,31 @@ test('student lifecycle supports create, archive, query, stats, and export', () 
 
   assert.equal(app.listStudents({ status: 'active' }).items[0].name, 'Bob');
   assert.equal(app.listStudents({ status: 'archived' }).items[0].name, 'Alice');
-  assert.deepEqual(app.getDashboardStats(), {
-    students: { active: 1, archived: 1, total: 2 },
-    homework: { total: 2, completed: 1 },
-    interviews: { total: 2 },
-    employmentRate: 50
-  });
+  const stats = app.getDashboardStats();
+  assert.deepEqual(stats.students, { active: 1, archived: 1, total: 2 });
+  assert.deepEqual(stats.homework, { total: 2, completed: 1 });
+  assert.equal(stats.interviews.total, 2);
+  assert.equal(stats.employmentRate, 50);
   assert.match(app.exportStudents({ status: 'active' }), /Bob/);
   assert.doesNotMatch(app.exportStudents({ status: 'active' }), /Alice/);
 });
 
-test('student name and phone are required', () => {
+test('student name and class are required while phone is optional', () => {
   const app = createApp({ db: createDatabase() });
 
   assert.throws(() => {
     app.createStudent({ name: '', phone: '', className: '前端1班' });
-  }, /name and phone are required/);
+  }, /student name and class are required/);
+
+  assert.throws(() => {
+    app.createStudent({ name: 'Alice', phone: '', className: '' });
+  }, /student name and class are required/);
+
+  const student = app.createStudent({ name: 'Alice', className: '前端1班' });
+
+  assert.equal(student.name, 'Alice');
+  assert.equal(student.className, '前端1班');
+  assert.equal(student.phone, '');
 });
 
 test('student api creates, updates, filters, and archives records over http', async () => {
@@ -130,6 +139,68 @@ test('student api creates, updates, filters, and archives records over http', as
     assert.equal(updated.student.phone, '13900000001');
     assert.equal(filtered.total, 1);
     assert.equal(archived.student.status, 'archived');
+  });
+});
+
+test('admins and teachers can create class options and teacher-created classes bind to the teacher', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, classNames: ['前端1班'] },
+      { username: 'student', password: 'student123', role: 'student', studentId: 1 }
+    ]
+  });
+  app.createClass({ className: '前端1班' }, { role: 'admin', username: 'admin' });
+
+  await withServer(app, async (baseUrl) => {
+    const adminCookie = await loginAs(baseUrl);
+    const teacherCookie = await loginAs(baseUrl, 'teacher', 'teacher123');
+    const studentCookie = await loginAs(baseUrl, 'student', 'student123');
+
+    const adminClass = await fetch(`${baseUrl}/api/classes`, {
+      method: 'POST',
+      headers: jsonHeaders(adminCookie),
+      body: JSON.stringify({ className: 'Java1班' })
+    }).then((response) => response.json());
+    const teacherClass = await fetch(`${baseUrl}/api/classes`, {
+      method: 'POST',
+      headers: jsonHeaders(teacherCookie),
+      body: JSON.stringify({ className: 'Vue1班' })
+    }).then((response) => response.json());
+    const teacherClasses = await fetch(`${baseUrl}/api/classes`, {
+      headers: { cookie: teacherCookie }
+    }).then((response) => response.json());
+    const teacherAssignment = await fetch(`${baseUrl}/api/homework-assignments`, {
+      method: 'POST',
+      headers: jsonHeaders(teacherCookie),
+      body: JSON.stringify({ homeworkName: 'Vue作业', className: 'Vue1班' })
+    });
+    const emptyClass = await fetch(`${baseUrl}/api/classes`, {
+      method: 'POST',
+      headers: jsonHeaders(adminCookie),
+      body: JSON.stringify({ className: '' })
+    });
+    const unauthorized = await fetch(`${baseUrl}/api/classes`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ className: '未登录班级' })
+    });
+    const forbidden = await fetch(`${baseUrl}/api/classes`, {
+      method: 'POST',
+      headers: jsonHeaders(studentCookie),
+      body: JSON.stringify({ className: '学生班级' })
+    });
+
+    assert.equal(adminClass.class.className, 'Java1班');
+    assert.equal(teacherClass.class.className, 'Vue1班');
+    assert.equal(teacherClasses.items.some((item) => item.className === '前端1班'), true);
+    assert.equal(teacherClasses.items.some((item) => item.className === 'Vue1班'), true);
+    assert.equal(teacherClasses.items.some((item) => item.className === 'Java1班'), false);
+    assert.equal(teacherAssignment.status, 201);
+    assert.equal(emptyClass.status, 400);
+    assert.equal(unauthorized.status, 401);
+    assert.equal(forbidden.status, 403);
   });
 });
 
@@ -343,7 +414,15 @@ test('homework student zip export includes only one student files and summary', 
 });
 
 test('homework analytics summarizes overview classes assignments and students', async () => {
-  const app = createApp({ db: createDatabase() });
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, classNames: ['Frontend1'] },
+      { username: 'open-teacher', password: 'teacher123', role: 'teacher', teacherId: 2 },
+      { username: 'student', password: 'student123', role: 'student', studentId: 1 }
+    ]
+  });
   const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend1' });
   const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: 'Frontend1' });
   const charlie = app.createStudent({ name: 'Charlie', phone: '13800000003', className: 'Java1' });
@@ -383,19 +462,32 @@ test('homework analytics summarizes overview classes assignments and students', 
 
   await withServer(app, async (baseUrl) => {
     const teacherCookie = await loginAs(baseUrl, 'teacher', 'teacher123');
+    const adminCookie = await loginAs(baseUrl);
+    const openTeacherCookie = await loginAs(baseUrl, 'open-teacher', 'teacher123');
     const studentCookie = await loginAs(baseUrl, 'student', 'student123');
+    const teacherMe = await fetch(`${baseUrl}/api/me`, { headers: { cookie: teacherCookie } }).then((response) => response.json());
     const analyticsResponse = await fetch(`${baseUrl}/api/homework-analytics?className=Frontend1`, { headers: { cookie: teacherCookie } });
     const analyticsBody = await analyticsResponse.json();
+    const teacherClasses = await fetch(`${baseUrl}/api/classes`, { headers: { cookie: teacherCookie } }).then((response) => response.json());
+    const forbiddenClassAnalytics = await fetch(`${baseUrl}/api/homework-analytics?className=Java1`, { headers: { cookie: teacherCookie } });
+    const openTeacherAnalytics = await fetch(`${baseUrl}/api/homework-analytics`, { headers: { cookie: openTeacherCookie } }).then((response) => response.json());
     const studentZip = await fetch(`${baseUrl}/api/export/homework/student/${alice.id}.zip`, { headers: { cookie: teacherCookie } });
     const unauthorizedAnalytics = await fetch(`${baseUrl}/api/homework-analytics`);
+    const adminAnalytics = await fetch(`${baseUrl}/api/homework-analytics`, { headers: { cookie: adminCookie } });
     const forbiddenAnalytics = await fetch(`${baseUrl}/api/homework-analytics`, { headers: { cookie: studentCookie } });
     const forbiddenStudentZip = await fetch(`${baseUrl}/api/export/homework/student/${alice.id}.zip`, { headers: { cookie: studentCookie } });
 
     assert.equal(analyticsResponse.status, 200);
+    assert.deepEqual(teacherMe.user.classNames, ['Frontend1']);
     assert.equal(analyticsBody.overview.recordCount, 4);
+    assert.deepEqual(teacherClasses.items.map((item) => item.className), ['Frontend1']);
+    assert.equal(forbiddenClassAnalytics.status, 403);
+    assert.equal(openTeacherAnalytics.overview.recordCount, 0);
+    assert.deepEqual(openTeacherAnalytics.classes, []);
     assert.equal(studentZip.status, 200);
     assert.equal(studentZip.headers.get('content-type'), 'application/zip');
     assert.equal(unauthorizedAnalytics.status, 401);
+    assert.equal(adminAnalytics.status, 403);
     assert.equal(forbiddenAnalytics.status, 403);
     assert.equal(forbiddenStudentZip.status, 403);
   });
@@ -411,6 +503,30 @@ test('database state can be saved and loaded from disk', () => {
   const loadedApp = createApp({ db: createDatabase({ filePath }) });
 
   assert.equal(loadedApp.listStudents().items[0].name, 'Alice');
+});
+
+test('class options and teacher bindings persist across reloads', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'student-management-classes-'));
+  const filePath = path.join(tempDir, 'data.json');
+  const authAccounts = [
+    { username: 'admin', password: 'admin123', role: 'admin' },
+    { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1 }
+  ];
+  const app = createApp({ db: createDatabase({ filePath }), authAccounts });
+  app.createClass({ className: '管理员班级' }, { role: 'admin', username: 'admin' });
+  app.createClass({ className: '老师班级' }, { role: 'teacher', username: 'teacher', teacherId: 1 });
+  app.saveDatabase();
+
+  const reloadedApp = createApp({ db: createDatabase({ filePath }), authAccounts });
+
+  await withServer(reloadedApp, async (baseUrl) => {
+    const teacherCookie = await loginAs(baseUrl, 'teacher', 'teacher123');
+    const me = await fetch(`${baseUrl}/api/me`, { headers: { cookie: teacherCookie } }).then((response) => response.json());
+    const classes = await fetch(`${baseUrl}/api/classes`, { headers: { cookie: teacherCookie } }).then((response) => response.json());
+
+    assert.deepEqual(me.user.classNames, ['老师班级']);
+    assert.deepEqual(classes.items.map((item) => item.className), ['老师班级']);
+  });
 });
 
 test('login returns a role based session and /api/me exposes the current user', async () => {
@@ -540,8 +656,136 @@ test('role permissions protect admin apis and teacher schedule ownership', async
     assert.equal(studentStudents.status, 403);
     assert.equal(teacherOwnSchedules.status, 200);
     assert.equal(teacherOtherSchedules.status, 403);
-    assert.equal(teacherApprove.status, 403);
+    assert.equal(teacherApprove.status, 200);
     assert.equal(teacherAccept.status, 200);
+  });
+});
+
+test('teacher scheduling participation controls student teacher choices and requests', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher-off', password: 'teacher123', role: 'teacher', teacherId: 1, teacherName: 'Teacher Off' },
+      { username: 'teacher-on', password: 'teacher123', role: 'teacher', teacherId: 2, teacherName: 'Teacher On', participatesInScheduling: true },
+      { username: 'student-a', password: 'student123', role: 'student', studentId: 1 }
+    ]
+  });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend' });
+
+  await withServer(app, async (baseUrl) => {
+    const adminCookie = await loginAs(baseUrl);
+    const teacherCookie = await loginAs(baseUrl, 'teacher-off', 'teacher123');
+    const studentCookie = await loginAs(baseUrl, 'student-a', 'student123');
+
+    const studentTeachersBefore = await fetch(`${baseUrl}/api/teachers`, { headers: { cookie: studentCookie } }).then((response) => response.json());
+    const adminTeachers = await fetch(`${baseUrl}/api/teachers`, { headers: { cookie: adminCookie } }).then((response) => response.json());
+    const blockedRequest = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(studentCookie),
+      body: JSON.stringify({
+        studentId: alice.id,
+        teacherId: 1,
+        teacherName: 'Teacher Off',
+        companyName: 'A Corp',
+        positionName: 'Frontend Engineer',
+        startsAt: '2026-05-18T09:00:00',
+        endsAt: '2026-05-18T09:30:00'
+      })
+    });
+    const allowedRequest = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(studentCookie),
+      body: JSON.stringify({
+        studentId: alice.id,
+        teacherId: 2,
+        teacherName: 'Teacher On',
+        companyName: 'B Corp',
+        positionName: 'Frontend Engineer',
+        startsAt: '2026-05-18T10:00:00',
+        endsAt: '2026-05-18T10:30:00'
+      })
+    });
+
+    const schedulingPatch = await fetch(`${baseUrl}/api/teacher-workspace/scheduling`, {
+      method: 'PATCH',
+      headers: jsonHeaders(teacherCookie),
+      body: JSON.stringify({ participatesInScheduling: true })
+    }).then((response) => response.json());
+    const studentTeachersAfter = await fetch(`${baseUrl}/api/teachers`, { headers: { cookie: studentCookie } }).then((response) => response.json());
+
+    assert.deepEqual(studentTeachersBefore.items.map((teacher) => teacher.id), [2]);
+    assert.equal(adminTeachers.items.find((teacher) => teacher.id === 1).participatesInScheduling, false);
+    assert.equal(adminTeachers.items.find((teacher) => teacher.id === 2).participatesInScheduling, true);
+    assert.equal(blockedRequest.status, 400);
+    assert.equal(allowedRequest.status, 201);
+    assert.equal(schedulingPatch.teacher.participatesInScheduling, true);
+    assert.deepEqual(studentTeachersAfter.items.map((teacher) => teacher.id).sort(), [1, 2]);
+  });
+});
+
+test('teachers can approve reject and filter their own interview schedules', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher-a', password: 'teacher123', role: 'teacher', teacherId: 1, teacherName: 'Teacher A', participatesInScheduling: true },
+      { username: 'teacher-b', password: 'teacher123', role: 'teacher', teacherId: 2, teacherName: 'Teacher B', participatesInScheduling: true }
+    ]
+  });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend' });
+  const own = app.createInterviewSchedule({
+    studentId: alice.id,
+    teacherId: 1,
+    teacherName: 'Teacher A',
+    companyName: 'Acme',
+    positionName: 'Frontend Engineer',
+    startsAt: '2026-05-18T09:00:00',
+    endsAt: '2026-05-18T09:30:00',
+    status: 'requested',
+    requestSource: 'student'
+  });
+  const rejectable = app.createInterviewSchedule({
+    studentId: alice.id,
+    teacherId: 1,
+    teacherName: 'Teacher A',
+    companyName: 'Beta',
+    positionName: 'Frontend Engineer',
+    startsAt: '2026-05-18T11:00:00',
+    endsAt: '2026-05-18T11:30:00',
+    status: 'requested',
+    requestSource: 'student'
+  });
+
+  await withServer(app, async (baseUrl) => {
+    const teacherACookie = await loginAs(baseUrl, 'teacher-a', 'teacher123');
+    const teacherBCookie = await loginAs(baseUrl, 'teacher-b', 'teacher123');
+
+    const forbidden = await fetch(`${baseUrl}/api/schedules/${own.id}/approve`, {
+      method: 'POST',
+      headers: jsonHeaders(teacherBCookie),
+      body: JSON.stringify({ confirmedByName: 'Teacher B' })
+    });
+    const approved = await fetch(`${baseUrl}/api/schedules/${own.id}/approve`, {
+      method: 'POST',
+      headers: jsonHeaders(teacherACookie),
+      body: JSON.stringify({ confirmedByName: 'Teacher A' })
+    }).then((response) => response.json());
+    const rejected = await fetch(`${baseUrl}/api/schedules/${rejectable.id}/reject`, {
+      method: 'POST',
+      headers: jsonHeaders(teacherACookie),
+      body: JSON.stringify({})
+    }).then((response) => response.json());
+    const keywordMatches = await fetch(`${baseUrl}/api/schedules?teacherId=1&keyword=Acme`, {
+      headers: { cookie: teacherACookie }
+    }).then((response) => response.json());
+
+    assert.equal(forbidden.status, 403);
+    assert.equal(approved.schedule.status, 'confirmed');
+    assert.equal(approved.schedule.confirmedByRole, 'teacher');
+    assert.equal(rejected.schedule.status, 'cancelled');
+    assert.equal(keywordMatches.total, 1);
+    assert.equal(keywordMatches.items[0].companyName, 'Acme');
   });
 });
 
@@ -602,14 +846,25 @@ test('student workspace only returns the bound student and only allows own sched
 
 test('dashboard stats are available for the frontend', async () => {
   const app = createApp({ db: createDatabase() });
-  app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: 'Java1班' });
+  const cindy = app.createStudent({ name: 'Cindy', phone: '13800000003', className: '数据分析班' });
+  app.addInterviewRecord({ studentId: alice.id, companyName: 'A公司', positionName: '前端工程师', interviewAt: '2026-05-10T09:00:00', result: 'passed', hiredStatus: 'hired' });
+  app.addInterviewRecord({ studentId: bob.id, companyName: 'B公司', positionName: 'Java工程师', interviewAt: '2026-05-11T09:00:00', result: 'failed', hiredStatus: 'not_hired' });
+  app.addInterviewRecord({ studentId: cindy.id, companyName: 'C公司', positionName: '数据分析师', interviewAt: '2026-05-12T09:00:00', result: 'pending', hiredStatus: 'pending' });
 
   await withServer(app, async (baseUrl) => {
     const cookie = await loginAs(baseUrl);
     const stats = await fetch(`${baseUrl}/api/dashboard/stats`, { headers: { cookie } }).then((response) => response.json());
 
-    assert.equal(stats.students.total, 1);
+    assert.equal(stats.students.total, 3);
     assert.equal(stats.homework.total, 0);
+    assert.equal(stats.interviews.total, 3);
+    assert.equal(stats.interviews.pending, 1);
+    assert.equal(stats.employmentRate, 33);
+    assert.deepEqual(stats.interviewResults, { pending: 1, passed: 1, failed: 1 });
+    assert.deepEqual(stats.hiredStatuses, { pending: 1, hired: 1, not_hired: 1 });
+    assert.equal(stats.recentInterviews[0].companyName, 'C公司');
   });
 });
 
@@ -908,13 +1163,13 @@ test('database saves with schema version, backup, and explicit damaged file erro
   }));
 
   const db = createDatabase({ filePath });
-  assert.equal(db.schemaVersion, 3);
+  assert.equal(db.schemaVersion, 4);
   assert.equal(db.students[0].status, 'active');
 
   db.save();
   const saved = JSON.parse(fs.readFileSync(filePath, 'utf8'));
 
-  assert.equal(saved.schemaVersion, 3);
+  assert.equal(saved.schemaVersion, 4);
   assert.equal(fs.existsSync(`${filePath}.tmp`), false);
   assert.equal(fs.existsSync(`${filePath}.bak`), true);
 
@@ -936,11 +1191,18 @@ test('student CSV export includes UTF-8 BOM for spreadsheet compatibility', () =
 
 test('student import preview validates rows and commit creates valid students', async () => {
   const app = createApp({ db: createDatabase() });
+  app.createClass({ className: '前端1班' });
+  app.createClass({ className: 'Java1班' });
+  app.createClass({ className: '前端2班' });
+  app.createClass({ className: 'Java2班' });
+  app.createStudent({ name: 'Existing', phone: '13800000001', className: '前端1班' });
   const importText = [
     '姓名,手机号,班级/课程',
-    'Alice,13800000001,前端1班',
+    'Alice,,前端1班',
     ',13900000002,Java1班',
-    'Bob,13800000001,Java1班'
+    'Bob,13800000001,Java1班',
+    'Cindy,13900000003,',
+    'Dora,13900000004,不存在班'
   ].join('\n');
 
   await withServer(app, async (baseUrl) => {
@@ -952,9 +1214,11 @@ test('student import preview validates rows and commit creates valid students', 
     }).then((response) => response.json());
 
     assert.equal(preview.validCount, 1);
-    assert.equal(preview.invalidCount, 2);
+    assert.equal(preview.invalidCount, 4);
     assert.deepEqual(preview.rows[1].errors, ['姓名不能为空']);
     assert.deepEqual(preview.rows[2].errors, ['手机号重复']);
+    assert.deepEqual(preview.rows[3].errors, ['班级不能为空']);
+    assert.deepEqual(preview.rows[4].errors, ['班级不存在，请先新增班级']);
 
     const mixedCommit = await fetch(`${baseUrl}/api/students/import/commit`, {
       method: 'POST',
@@ -962,8 +1226,8 @@ test('student import preview validates rows and commit creates valid students', 
       body: JSON.stringify({ text: importText })
     }).then((response) => response.json());
     assert.equal(mixedCommit.created.length, 1);
-    assert.equal(mixedCommit.invalidCount, 2);
-    assert.equal(app.listStudents().total, 1);
+    assert.equal(mixedCommit.invalidCount, 4);
+    assert.equal(app.listStudents().total, 2);
 
     const commit = await fetch(`${baseUrl}/api/students/import/commit`, {
       method: 'POST',
@@ -972,7 +1236,46 @@ test('student import preview validates rows and commit creates valid students', 
     }).then((response) => response.json());
 
     assert.equal(commit.created.length, 2);
-    assert.equal(app.listStudents().total, 3);
+    assert.equal(app.listStudents().total, 4);
+  });
+});
+
+test('simple paste student import supports two columns and default class without CSV upload', async () => {
+  const app = createApp({ db: createDatabase() });
+  app.createClass({ className: 'Frontend' });
+  app.createClass({ className: 'Java' });
+
+  await withServer(app, async (baseUrl) => {
+    const cookie = await loginAs(baseUrl);
+    const preview = await fetch(`${baseUrl}/api/students/import/preview`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({
+        mode: 'simplePaste',
+        text: 'Alice\tFrontend\nBob\tUnknown\n\tJava'
+      })
+    }).then((response) => response.json());
+
+    assert.equal(preview.validCount, 1);
+    assert.equal(preview.invalidCount, 2);
+    assert.equal(preview.rows[0].student.name, 'Alice');
+    assert.equal(preview.rows[0].student.className, 'Frontend');
+    assert.deepEqual(preview.rows[1].errors, ['鐝骇涓嶅瓨鍦紝璇峰厛鏂板鐝骇']);
+    assert.deepEqual(preview.rows[2].errors, ['濮撳悕涓嶈兘涓虹┖']);
+
+    const commit = await fetch(`${baseUrl}/api/students/import/commit`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({
+        mode: 'simplePaste',
+        defaultClassName: 'Java',
+        text: 'Cindy\nDana'
+      })
+    }).then((response) => response.json());
+
+    assert.equal(commit.created.length, 2);
+    assert.equal(commit.invalidCount, 0);
+    assert.equal(app.listStudents({ className: 'Java' }).total, 2);
   });
 });
 
@@ -984,6 +1287,7 @@ test('student import template and commit can generate bound student accounts', a
       { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1 }
     ]
   });
+  app.createClass({ className: '前端1班' });
 
   await withServer(app, async (baseUrl) => {
     const cookie = await loginAs(baseUrl);
@@ -995,27 +1299,27 @@ test('student import template and commit can generate bound student accounts', a
 
     assert.equal(templateResponse.status, 200);
     assert.deepEqual([...templateBody.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
-    assert.match(template, /^﻿姓名,手机号,性别,出生日期,班级\/课程,入学日期,备注/);
+    assert.match(template, /^﻿姓名（必填）,手机号（选填）,性别（选填）,出生日期（选填）,班级\/课程（必填）,入学日期（选填）,备注（选填）/);
 
     const commit = await fetch(`${baseUrl}/api/students/import/commit`, {
       method: 'POST',
       headers: jsonHeaders(cookie),
       body: JSON.stringify({
         generateAccounts: true,
-        text: '姓名,手机号,性别,出生日期,班级/课程,入学日期,备注\nAlice,13800000001,女,2001-01-01,前端1班,2026-05-01,认真'
+        text: '姓名,手机号,性别,出生日期,班级/课程,入学日期,备注\nAlice,,女,2001-01-01,前端1班,2026-05-01,认真'
       })
     }).then((response) => response.json());
 
     assert.equal(commit.created.length, 1);
     assert.equal(commit.accounts.length, 1);
-    assert.equal(commit.accounts[0].username, '13800000001');
+    assert.equal(commit.accounts[0].username, `student${commit.created[0].id}`);
     assert.equal(commit.accounts[0].studentId, commit.created[0].id);
     assert.ok(commit.accounts[0].initialPassword.length >= 8);
     const generatedStudents = app.listStudents({ accountStatus: 'generated' });
     const missingStudents = app.listStudents({ accountStatus: 'missing' });
     const accountExport = app.exportStudentAccounts();
     assert.equal(generatedStudents.total, 1);
-    assert.equal(generatedStudents.items[0].accountUsername, '13800000001');
+    assert.equal(generatedStudents.items[0].accountUsername, commit.accounts[0].username);
     assert.equal(generatedStudents.items[0].password, undefined);
     assert.equal(generatedStudents.items[0].passwordHash, undefined);
     assert.equal(missingStudents.total, 0);
@@ -1027,13 +1331,75 @@ test('student import template and commit can generate bound student accounts', a
       headers: { cookie }
     }).then((response) => response.json());
     assert.equal(students.items[0].hasAccount, true);
-    assert.equal(students.items[0].accountUsername, '13800000001');
+    assert.equal(students.items[0].accountUsername, commit.accounts[0].username);
 
     const studentCookie = await loginAs(baseUrl, commit.accounts[0].username, commit.accounts[0].initialPassword);
     const workspace = await fetch(`${baseUrl}/api/student-workspace`, {
       headers: { cookie: studentCookie }
     }).then((response) => response.json());
     assert.equal(workspace.student.name, 'Alice');
+  });
+});
+
+test('students can complete optional profile fields without changing identity or class', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1 },
+      { username: 'student', password: 'student123', role: 'student', studentId: 1 }
+    ]
+  });
+  const alice = app.createStudent({ name: 'Alice', className: '前端1班' });
+  app.createStudent({ name: 'Bob', phone: '13800000002', className: '前端1班' });
+
+  await withServer(app, async (baseUrl) => {
+    const studentCookie = await loginAs(baseUrl, 'student', 'student123');
+    const adminCookie = await loginAs(baseUrl);
+    const teacherCookie = await loginAs(baseUrl, 'teacher', 'teacher123');
+
+    const updated = await fetch(`${baseUrl}/api/student-workspace/profile`, {
+      method: 'PATCH',
+      headers: jsonHeaders(studentCookie),
+      body: JSON.stringify({
+        name: 'Bad Name',
+        className: 'Bad Class',
+        status: 'archived',
+        phone: '13800000003',
+        gender: '女',
+        birthday: '2001-01-01',
+        enrolledAt: '2026-05-01',
+        remark: '自己补全'
+      })
+    }).then((response) => response.json());
+    const duplicatePhone = await fetch(`${baseUrl}/api/student-workspace/profile`, {
+      method: 'PATCH',
+      headers: jsonHeaders(studentCookie),
+      body: JSON.stringify({ phone: '13800000002' })
+    });
+    const adminForbidden = await fetch(`${baseUrl}/api/student-workspace/profile`, {
+      method: 'PATCH',
+      headers: jsonHeaders(adminCookie),
+      body: JSON.stringify({ phone: '13800000004' })
+    });
+    const teacherForbidden = await fetch(`${baseUrl}/api/student-workspace/profile`, {
+      method: 'PATCH',
+      headers: jsonHeaders(teacherCookie),
+      body: JSON.stringify({ phone: '13800000005' })
+    });
+
+    assert.equal(updated.student.id, alice.id);
+    assert.equal(updated.student.name, 'Alice');
+    assert.equal(updated.student.className, '前端1班');
+    assert.equal(updated.student.status, 'active');
+    assert.equal(updated.student.phone, '13800000003');
+    assert.equal(updated.student.gender, '女');
+    assert.equal(updated.student.birthday, '2001-01-01');
+    assert.equal(updated.student.enrolledAt, '2026-05-01');
+    assert.equal(updated.student.remark, '自己补全');
+    assert.equal(duplicatePhone.status, 400);
+    assert.equal(adminForbidden.status, 403);
+    assert.equal(teacherForbidden.status, 403);
   });
 });
 
@@ -1128,5 +1494,81 @@ test('student account management endpoints are admin only', async () => {
     assert.equal(teacherGenerate.status, 403);
     assert.equal(teacherReset.status, 403);
     assert.equal(studentExport.status, 403);
+  });
+});
+
+test('admin can create update and disable teacher accounts and disable student accounts', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher-config', password: 'teacher123', role: 'teacher', teacherId: 1, teacherName: 'Config Teacher' }
+    ]
+  });
+  app.createClass({ className: 'Frontend' });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend' });
+
+  await withServer(app, async (baseUrl) => {
+    const adminCookie = await loginAs(baseUrl);
+    const generated = await fetch(`${baseUrl}/api/students/accounts/generate`, {
+      method: 'POST',
+      headers: jsonHeaders(adminCookie),
+      body: JSON.stringify({ studentIds: [alice.id] })
+    }).then((response) => response.json());
+
+    const created = await fetch(`${baseUrl}/api/admin/teacher-accounts`, {
+      method: 'POST',
+      headers: jsonHeaders(adminCookie),
+      body: JSON.stringify({
+        username: 'teacher-new',
+        teacherName: 'New Teacher',
+        classNames: ['Frontend'],
+        participatesInScheduling: true
+      })
+    }).then((response) => response.json());
+    await loginAs(baseUrl, 'teacher-new', created.account.initialPassword);
+
+    const patched = await fetch(`${baseUrl}/api/admin/teacher-accounts/${encodeURIComponent(created.account.accountKey)}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(adminCookie),
+      body: JSON.stringify({
+        teacherName: 'Updated Teacher',
+        classNames: [],
+        participatesInScheduling: false
+      })
+    }).then((response) => response.json());
+    const teacherAccounts = await fetch(`${baseUrl}/api/admin/teacher-accounts`, {
+      headers: { cookie: adminCookie }
+    }).then((response) => response.json());
+
+    const configTeacher = teacherAccounts.items.find((account) => account.username === 'teacher-config');
+    const disabledConfig = await fetch(`${baseUrl}/api/admin/teacher-accounts/${encodeURIComponent(configTeacher.accountKey)}`, {
+      method: 'DELETE',
+      headers: { cookie: adminCookie }
+    });
+    const disabledStudent = await fetch(`${baseUrl}/api/students/${alice.id}/account`, {
+      method: 'DELETE',
+      headers: { cookie: adminCookie }
+    });
+    const configLogin = await fetch(`${baseUrl}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'teacher-config', password: 'teacher123' })
+    });
+    const studentLogin = await fetch(`${baseUrl}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: generated.accounts[0].username, password: generated.accounts[0].initialPassword })
+    });
+
+    assert.equal(created.account.username, 'teacher-new');
+    assert.ok(created.account.initialPassword.length >= 8);
+    assert.equal(patched.account.teacherName, 'Updated Teacher');
+    assert.equal(patched.account.participatesInScheduling, false);
+    assert.equal(disabledConfig.status, 200);
+    assert.equal(disabledStudent.status, 200);
+    assert.equal(configLogin.status, 401);
+    assert.equal(studentLogin.status, 401);
+    assert.equal(app.listStudents({ keyword: 'Alice' }).total, 1);
   });
 });

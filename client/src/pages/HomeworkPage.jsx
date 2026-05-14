@@ -28,6 +28,17 @@ function formatFileSize(value) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function normalizeClassItem(item) {
+  const className = String(item?.className || '').trim();
+  if (!className) return null;
+  return { ...item, className };
+}
+
+function classOptionLabel(item) {
+  const count = Number(item.studentCount);
+  return Number.isFinite(count) ? `${item.className}（${count} 名在读）` : item.className;
+}
+
 function homeworkStatusText(status) {
   if (status === 'submitted' || status === 'reviewed') return '已提交';
   if (status === 'pending') return '待提交';
@@ -49,9 +60,11 @@ export default function HomeworkPage() {
   const [submitStatus, setSubmitStatus] = useState('');
   const [keyword, setKeyword] = useState('');
   const [form, setForm] = useState(emptyAssignmentForm);
+  const [newClassName, setNewClassName] = useState('');
   const [loadingAssignments, setLoadingAssignments] = useState(false);
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [creatingClass, setCreatingClass] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
@@ -65,18 +78,39 @@ export default function HomeworkPage() {
   }), [selectedAssignmentId, submitStatus, keyword]);
   const exportCsvUrl = buildPath('/api/export/homework', recordFilters);
   const exportZipUrl = selectedAssignment ? `/api/export/homework/${selectedAssignment.id}.zip` : '';
+  const classOptions = useMemo(() => {
+    const seen = new Set();
+    const options = [];
+    classes.forEach((item) => {
+      const option = normalizeClassItem(item);
+      if (!option || seen.has(option.className)) return;
+      seen.add(option.className);
+      options.push(option);
+    });
+    const currentClassName = form.className.trim();
+    if (currentClassName && !seen.has(currentClassName)) {
+      options.unshift({ id: `current-${currentClassName}`, className: currentClassName });
+    }
+    return options;
+  }, [classes, form.className]);
+
+  async function loadClassList() {
+    const classData = await apiGet('/api/classes');
+    const items = (classData.items || []).map(normalizeClassItem).filter(Boolean);
+    setClasses(items);
+    return items;
+  }
 
   async function loadAssignments(preferredId = '') {
     setLoadingAssignments(true);
     setError('');
     try {
-      const [assignmentData, classData] = await Promise.all([
+      const [assignmentData] = await Promise.all([
         apiGet('/api/homework-assignments'),
-        apiGet('/api/classes')
+        loadClassList()
       ]);
       const items = assignmentData.items || [];
       setAssignments(items);
-      setClasses(classData.items || []);
       const nextId = preferredId || readPendingAssignmentId() || selectedAssignmentId || items[0]?.id || '';
       setSelectedAssignmentId(nextId ? String(nextId) : '');
     } catch (err) {
@@ -137,6 +171,30 @@ export default function HomeworkPage() {
     }
   }
 
+  async function handleCreateClass() {
+    const className = newClassName.trim();
+    if (!className) {
+      setError('请先填写班级/课程名称');
+      return;
+    }
+
+    setCreatingClass(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await apiPost('/api/classes', { className });
+      const selectedClassName = result.class?.className || className;
+      setNewClassName('');
+      setForm((current) => ({ ...current, className: selectedClassName }));
+      await loadClassList();
+      setMessage(`已新增班级/课程：${selectedClassName}`);
+    } catch (err) {
+      setError(err.message || '新增班级/课程失败');
+    } finally {
+      setCreatingClass(false);
+    }
+  }
+
   return (
     <section className="admin-page homework-page">
       <div className="page-header">
@@ -162,17 +220,40 @@ export default function HomeworkPage() {
         </label>
         <label>
           班级/课程
-          <input required list="homework-class-options" value={form.className} onChange={(event) => updateForm('className', event.target.value)} placeholder="选择或输入班级" />
-          <datalist id="homework-class-options">
-            {classes.map((item) => (
-              <option key={item.className} value={item.className}>{item.studentCount} 名在读学生</option>
+          <select required value={form.className} onChange={(event) => updateForm('className', event.target.value)}>
+            <option value="">请选择班级/课程</option>
+            {classOptions.map((item) => (
+              <option key={`${item.id || 'class'}-${item.className}`} value={item.className}>
+                {classOptionLabel(item)}
+              </option>
             ))}
-          </datalist>
+          </select>
         </label>
         <label>
           截止日期
           <input type="date" value={form.dueDate} onChange={(event) => updateForm('dueDate', event.target.value)} />
         </label>
+        <div className="inline-create form-wide">
+          <label>
+            新增班级/课程
+            <input
+              value={newClassName}
+              onChange={(event) => setNewClassName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  handleCreateClass();
+                }
+              }}
+              placeholder="例如：前端就业班"
+              disabled={creatingClass}
+            />
+          </label>
+          <button className="button button-secondary" type="button" onClick={handleCreateClass} disabled={creatingClass || !newClassName.trim()}>
+            {creatingClass ? '正在新增...' : '新增并选择'}
+          </button>
+          <span className="muted">老师可先新增班级，成功后立即用于发布作业。</span>
+        </div>
         <label className="form-wide">
           作业说明
           <textarea value={form.description} onChange={(event) => updateForm('description', event.target.value)} placeholder="说明提交要求，例如：上传 TXT 文件。" />

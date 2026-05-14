@@ -39,6 +39,14 @@ function createAppWithOptions({
     ? normalizeAuthAccounts(db.authAccounts)
     : [];
   if (!Number.isInteger(db.nextAuthAccountId)) db.nextAuthAccountId = nextRuntimeId(db.authAccounts);
+  if (!Array.isArray(db.classes)) db.classes = [];
+  if (!Number.isInteger(db.nextClassId)) db.nextClassId = nextRuntimeId(db.classes);
+  for (const account of listAllAuthAccounts(baseAuthAccounts, db)) {
+    if (account.role !== 'teacher') continue;
+    for (const className of account.classNames || []) {
+      ensureClassOption(db, className, account);
+    }
+  }
   const teacherDirectory = normalizeTeachers(teachers);
   const sessionMaxAgeMs = Number(sessionMaxAgeSeconds || DEFAULT_SESSION_MAX_AGE_SECONDS) * 1000;
   const maxHomeworkFileBytes = Number(homeworkMaxFileBytes || DEFAULT_HOMEWORK_MAX_FILE_BYTES);
@@ -47,9 +55,12 @@ function createAppWithOptions({
     createStudent(input) {
       const name = String(input.name || '').trim();
       const phone = String(input.phone || '').trim();
-      if (!name || !phone) {
-        throw new Error('name and phone are required');
+      const className = String(input.className || '').trim();
+      if (!name || !className) {
+        throw new Error('student name and class are required');
       }
+      assertUniqueStudentPhone(db, phone);
+      ensureClassOption(db, className);
 
       const student = {
         id: db.nextStudentId++,
@@ -57,7 +68,7 @@ function createAppWithOptions({
         phone,
         gender: input.gender || '',
         birthday: input.birthday || '',
-        className: input.className || '',
+        className,
         enrolledAt: input.enrolledAt || '',
         status: 'active',
         archivedAt: null,
@@ -70,11 +81,17 @@ function createAppWithOptions({
     updateStudent(id, patch) {
       const student = db.students.find((item) => item.id === id);
       if (!student) throw new Error('student not found');
-      student.name = patch.name ?? student.name;
-      student.phone = patch.phone ?? student.phone;
+      const name = patch.name === undefined ? student.name : String(patch.name || '').trim();
+      const phone = patch.phone === undefined ? student.phone : String(patch.phone || '').trim();
+      const className = patch.className === undefined ? student.className : String(patch.className || '').trim();
+      if (!name || !className) throw new Error('student name and class are required');
+      assertUniqueStudentPhone(db, phone, id);
+      ensureClassOption(db, className);
+      student.name = name;
+      student.phone = phone;
       student.gender = patch.gender ?? student.gender;
       student.birthday = patch.birthday ?? student.birthday;
-      student.className = patch.className ?? student.className;
+      student.className = className;
       student.enrolledAt = patch.enrolledAt ?? student.enrolledAt;
       student.remark = patch.remark ?? student.remark;
       return student;
@@ -104,7 +121,7 @@ function createAppWithOptions({
     },
 
     exportStudentImportTemplate() {
-      return toCsvWithBom([['姓名', '手机号', '性别', '出生日期', '班级/课程', '入学日期', '备注']]);
+      return toCsvWithBom([['姓名（必填）', '手机号（选填）', '性别（选填）', '出生日期（选填）', '班级/课程（必填）', '入学日期（选填）', '备注（选填）']]);
     },
 
     previewStudentImport(input = {}) {
@@ -201,6 +218,20 @@ function createAppWithOptions({
       }
 
       return { accounts, skipped, skippedCount: skipped.length };
+    },
+
+    updateStudentProfile(session = {}, patch = {}) {
+      if (!session.studentId) throw createHttpError('student account not bound', 403);
+      const student = db.students.find((item) => Number(item.id) === Number(session.studentId));
+      if (!student) throw new Error('student not found');
+      const phone = patch.phone === undefined ? student.phone : String(patch.phone || '').trim();
+      assertUniqueStudentPhone(db, phone, student.id);
+      student.phone = phone;
+      student.gender = patch.gender === undefined ? student.gender : String(patch.gender || '').trim();
+      student.birthday = patch.birthday === undefined ? student.birthday : String(patch.birthday || '').trim();
+      student.enrolledAt = patch.enrolledAt === undefined ? student.enrolledAt : String(patch.enrolledAt || '').trim();
+      student.remark = patch.remark === undefined ? student.remark : String(patch.remark || '').trim();
+      return student;
     },
 
     archiveStudent(id) {
@@ -575,11 +606,27 @@ function createAppWithOptions({
       const completed = db.homeworkRecords.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length;
       const hired = db.interviewRecords.filter((record) => record.hiredStatus === 'hired').length;
       const interviewTotal = db.interviewRecords.length;
+      const interviewResults = countByEnum(db.interviewRecords, 'result', VALID_INTERVIEW_RESULTS);
+      const hiredStatuses = countByEnum(db.interviewRecords, 'hiredStatus', VALID_HIRED_STATUSES);
+      const pendingSchedules = db.interviewSchedules
+        .filter((schedule) => schedule.status === 'requested')
+        .slice()
+        .sort((left, right) => String(right.startsAt || '').localeCompare(String(left.startsAt || '')))
+        .slice(0, 8);
+      const recentInterviews = db.interviewRecords
+        .slice()
+        .sort((left, right) => String(right.interviewAt || '').localeCompare(String(left.interviewAt || '')))
+        .slice(0, 8)
+        .map((record) => withInterviewStudent(db, record));
 
       return {
         students: { active, archived, total: db.students.length },
         homework: { total: db.homeworkRecords.length, completed },
-        interviews: { total: interviewTotal },
+        interviews: { total: interviewTotal, ...interviewResults },
+        interviewResults,
+        hiredStatuses,
+        pendingSchedules,
+        recentInterviews,
         employmentRate: interviewTotal === 0 ? 0 : Math.round((hired / interviewTotal) * 100)
       };
     },
@@ -592,16 +639,44 @@ function createAppWithOptions({
       return { items: teacherDirectory.map((teacher) => ({ ...teacher })), total: teacherDirectory.length };
     },
 
-    listClasses() {
+    listClasses(filters = {}) {
+      const allowedClassNames = Array.isArray(filters.classNames)
+        ? filters.classNames.map((className) => String(className || '').trim()).filter(Boolean)
+        : null;
       const classes = new Map();
+      for (const classOption of db.classes) {
+        if (!classOption.className) continue;
+        if (allowedClassNames && !allowedClassNames.includes(classOption.className)) continue;
+        classes.set(classOption.className, 0);
+      }
       for (const student of db.students) {
         if (student.status !== 'active' || !student.className) continue;
+        if (allowedClassNames && !allowedClassNames.includes(student.className)) continue;
         classes.set(student.className, (classes.get(student.className) || 0) + 1);
       }
+      if (allowedClassNames) {
+        for (const className of allowedClassNames) {
+          if (!classes.has(className)) classes.set(className, 0);
+        }
+      }
       const items = Array.from(classes.entries())
-        .map(([className, studentCount]) => ({ className, studentCount }))
+        .map(([className, studentCount]) => {
+          const classOption = findClassOption(db, className);
+          return { id: classOption?.id || null, className, studentCount };
+        })
         .sort((left, right) => left.className.localeCompare(right.className, 'zh-CN'));
       return { items, total: items.length };
+    },
+
+    createClass(input = {}, session = {}) {
+      const className = String(input.className || '').trim();
+      if (!className) throw new Error('class name is required');
+      const classOption = ensureClassOption(db, className, session);
+      if (session.role === 'teacher' && Array.isArray(session.classNames) && !session.classNames.includes(className)) {
+        session.classNames.push(className);
+        session.classNames.sort((left, right) => left.localeCompare(right, 'zh-CN'));
+      }
+      return publicClassOption(db, classOption);
     },
 
     login({ username, password }) {
@@ -623,6 +698,7 @@ function createAppWithOptions({
         username: account.username,
         teacherId: account.teacherId || null,
         studentId: account.studentId || null,
+        classNames: account.role === 'teacher' ? teacherClassNamesForAccount(db, account) : [],
         expiresAt: Date.now() + sessionMaxAgeMs
       };
       sessions.set(token, session);
@@ -791,6 +867,11 @@ function normalizeAuthAccounts(authAccounts) {
       role,
       teacherId: account.teacherId ? Number(account.teacherId) : null,
       studentId: account.studentId ? Number(account.studentId) : null,
+      teacherName: account.teacherName || '',
+      classNames: Array.isArray(account.classNames)
+        ? account.classNames.map((className) => String(className || '').trim()).filter(Boolean)
+        : [],
+      participatesInScheduling: account.participatesInScheduling === true,
       status: account.status || 'active',
       createdAt: account.createdAt || '',
       passwordUpdatedAt: account.passwordUpdatedAt || ''
@@ -804,6 +885,72 @@ function listAllAuthAccounts(baseAuthAccounts, db) {
     ...baseAuthAccounts,
     ...storedAccounts
   ].filter((account) => account.status !== 'disabled');
+}
+
+function findClassOption(db, className) {
+  const normalized = String(className || '').trim();
+  return (db.classes || []).find((item) => item.className === normalized) || null;
+}
+
+function ensureClassOption(db, className, session = {}) {
+  const normalized = String(className || '').trim();
+  if (!normalized) throw new Error('class name is required');
+  if (!Array.isArray(db.classes)) db.classes = [];
+  let classOption = findClassOption(db, normalized);
+  if (!classOption) {
+    classOption = {
+      id: db.nextClassId++,
+      className: normalized,
+      createdAt: new Date().toISOString(),
+      createdByRole: session.role || '',
+      createdByName: session.username || '',
+      teacherIds: [],
+      teacherUsernames: []
+    };
+    db.classes.push(classOption);
+  }
+  bindClassToTeacher(classOption, session);
+  return classOption;
+}
+
+function bindClassToTeacher(classOption, session = {}) {
+  if (session.role !== 'teacher') return;
+  if (!Array.isArray(classOption.teacherIds)) classOption.teacherIds = [];
+  if (!Array.isArray(classOption.teacherUsernames)) classOption.teacherUsernames = [];
+  if (session.teacherId && !classOption.teacherIds.includes(Number(session.teacherId))) {
+    classOption.teacherIds.push(Number(session.teacherId));
+  }
+  if (session.username && !classOption.teacherUsernames.includes(session.username)) {
+    classOption.teacherUsernames.push(session.username);
+  }
+}
+
+function publicClassOption(db, classOption) {
+  return {
+    id: classOption.id,
+    className: classOption.className,
+    studentCount: db.students.filter((student) =>
+      student.status === 'active' && student.className === classOption.className
+    ).length
+  };
+}
+
+function teacherClassNamesForAccount(db, account) {
+  const names = new Set((account.classNames || []).filter(Boolean));
+  for (const classOption of db.classes || []) {
+    if ((classOption.teacherIds || []).includes(Number(account.teacherId))) names.add(classOption.className);
+    if ((classOption.teacherUsernames || []).includes(account.username)) names.add(classOption.className);
+  }
+  return Array.from(names).sort((left, right) => left.localeCompare(right, 'zh-CN'));
+}
+
+function assertUniqueStudentPhone(db, phone, currentStudentId = null) {
+  const normalized = String(phone || '').trim();
+  if (!normalized) return;
+  const duplicate = db.students.find((student) =>
+    student.phone === normalized && Number(student.id) !== Number(currentStudentId)
+  );
+  if (duplicate) throw new Error('student phone already exists');
 }
 
 function nextRuntimeId(records) {
@@ -893,6 +1040,18 @@ function accountStatusLabel(status) {
   return '正常';
 }
 
+function countByEnum(records, fieldName, values) {
+  const result = {};
+  for (const value of values) {
+    result[value] = 0;
+  }
+  for (const record of records) {
+    const value = values.has(record[fieldName]) ? record[fieldName] : 'pending';
+    result[value] = (result[value] || 0) + 1;
+  }
+  return result;
+}
+
 function defaultUploadRoot(db) {
   if (db?.filePath) {
     return path.join(path.dirname(db.filePath), 'uploads');
@@ -925,22 +1084,21 @@ function isHomeworkSubmittedStatus(status) {
 }
 
 function buildHomeworkAnalytics(db, filters = {}) {
-  const className = String(filters.className || '').trim();
+  const classScope = resolveClassScope(filters);
   const activeStudents = db.students.filter((student) => student.status === 'active');
-  const students = className ? activeStudents.filter((student) => student.className === className) : activeStudents;
+  const students = activeStudents.filter((student) => inClassScope(student.className, classScope));
   const assignments = db.homeworkAssignments
-    .filter((assignment) => !className || assignment.className === className)
+    .filter((assignment) => inClassScope(assignment.className, classScope))
     .slice()
     .sort((left, right) => right.id - left.id);
   const records = db.homeworkRecords.filter((record) => {
-    if (className && record.className !== className) return false;
-    return true;
+    return inClassScope(record.className, classScope);
   });
   const latestAssignment = assignments[0] || null;
 
   return {
     overview: buildHomeworkOverview(students, assignments, records),
-    classes: buildHomeworkClassAnalytics(activeStudents, db.homeworkAssignments, db.homeworkRecords, className),
+    classes: buildHomeworkClassAnalytics(activeStudents, db.homeworkAssignments, db.homeworkRecords, classScope.classNames),
     assignments: assignments.map((assignment) => {
       const assignmentRecords = records.filter((record) => Number(record.assignmentId) === Number(assignment.id));
       return {
@@ -978,6 +1136,24 @@ function buildHomeworkAnalytics(db, filters = {}) {
   };
 }
 
+function resolveClassScope(filters = {}) {
+  const className = String(filters.className || '').trim();
+  if (className) return { classNames: [className] };
+  if (Array.isArray(filters.classNames)) {
+    return {
+      classNames: filters.classNames
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+    };
+  }
+  return { classNames: null };
+}
+
+function inClassScope(className, scope) {
+  if (!scope.classNames) return true;
+  return scope.classNames.includes(className || '');
+}
+
 function buildHomeworkOverview(students, assignments, records) {
   const submittedCount = records.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length;
   return {
@@ -990,8 +1166,9 @@ function buildHomeworkOverview(students, assignments, records) {
   };
 }
 
-function buildHomeworkClassAnalytics(students, assignments, records, selectedClassName = '') {
+function buildHomeworkClassAnalytics(students, assignments, records, selectedClassNames = null) {
   const classNames = new Set();
+  const selected = Array.isArray(selectedClassNames) ? selectedClassNames : null;
   for (const student of students) {
     if (student.className) classNames.add(student.className);
   }
@@ -1001,9 +1178,14 @@ function buildHomeworkClassAnalytics(students, assignments, records, selectedCla
   for (const record of records) {
     if (record.className) classNames.add(record.className);
   }
+  if (selected) {
+    for (const className of selected) {
+      if (className) classNames.add(className);
+    }
+  }
 
   return Array.from(classNames)
-    .filter((className) => !selectedClassName || className === selectedClassName)
+    .filter((className) => !selected || selected.includes(className))
     .sort((left, right) => left.localeCompare(right, 'zh-CN'))
     .map((className) => {
       const classRecords = records.filter((record) => record.className === className);
@@ -1061,6 +1243,16 @@ function withHomeworkStudent(db, record) {
     ...record,
     studentName: student?.name || '',
     studentPhone: student?.phone || ''
+  };
+}
+
+function withInterviewStudent(db, record) {
+  const student = db.students.find((item) => item.id === record.studentId);
+  return {
+    ...record,
+    studentName: student?.name || '',
+    studentPhone: student?.phone || '',
+    className: student?.className || ''
   };
 }
 
@@ -1228,13 +1420,17 @@ function previewStudentImport(db, text) {
   const rows = parseCsv(text);
   const { dataRows, header } = splitImportHeader(rows);
   const existingPhones = new Set(db.students.map((student) => student.phone).filter(Boolean));
+  const existingClasses = new Set((db.classes || []).map((item) => item.className).filter(Boolean));
   const seenPhones = new Set();
   const previewRows = dataRows.map((cells, index) => {
     const student = readStudentImportRow(cells, header);
     const errors = [];
 
     if (!student.name) errors.push('姓名不能为空');
-    if (!student.phone) errors.push('手机号不能为空');
+    if (!student.className) errors.push('班级不能为空');
+    if (student.className && !existingClasses.has(student.className)) {
+      errors.push('班级不存在，请先新增班级');
+    }
     if (student.phone && (existingPhones.has(student.phone) || seenPhones.has(student.phone))) {
       errors.push('手机号重复');
     }
@@ -1314,7 +1510,7 @@ function splitImportHeader(rows) {
 }
 
 function normalizeImportHeader(cell) {
-  const text = String(cell || '').trim();
+  const text = String(cell || '').trim().replace(/（必填）|（选填）|\(必填\)|\(选填\)/g, '');
   const aliases = {
     name: ['姓名', 'name'],
     phone: ['手机号', '手机', '电话', 'phone'],

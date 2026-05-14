@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { apiGet, apiPost, apiUpload } from '../api.js';
+import { apiGet, apiPatch, apiPost, apiUpload } from '../api.js';
 import StatusBadge, { statusText } from '../components/StatusBadge.jsx';
 
 const EMPTY_FORM = {
@@ -9,6 +9,14 @@ const EMPTY_FORM = {
   positionName: '',
   startsAt: '',
   endsAt: '',
+  remark: ''
+};
+
+const EMPTY_PROFILE_FORM = {
+  phone: '',
+  gender: '',
+  birthday: '',
+  enrolledAt: '',
   remark: ''
 };
 
@@ -38,6 +46,16 @@ function normalizeWorkspacePayload(payload) {
   };
 }
 
+function toProfileForm(student) {
+  return {
+    phone: student?.phone || '',
+    gender: student?.gender || '',
+    birthday: student?.birthday || '',
+    enrolledAt: student?.enrolledAt || '',
+    remark: student?.remark || ''
+  };
+}
+
 function applyDefaultTeacher(form, teachers) {
   if (form.teacherId || !teachers.length) return form;
   const firstTeacher = teachers[0];
@@ -61,8 +79,10 @@ export default function StudentWorkspace({ user = {} }) {
   const [schedules, setSchedules] = useState([]);
   const [teachers, setTeachers] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
+  const [profileForm, setProfileForm] = useState(EMPTY_PROFILE_FORM);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
   const [submittingHomeworkId, setSubmittingHomeworkId] = useState(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -80,6 +100,7 @@ export default function StudentWorkspace({ user = {} }) {
       const workspace = normalizeWorkspacePayload(payload);
       const teacherItems = Array.isArray(teacherPayload?.items) ? teacherPayload.items : [];
       setStudent(workspace.student);
+      setProfileForm(toProfileForm(workspace.student));
       setHomeworkRecords(workspace.homeworkRecords);
       setInterviewRecords(workspace.interviewRecords);
       setSchedules(workspace.schedules);
@@ -120,6 +141,10 @@ export default function StudentWorkspace({ user = {} }) {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
+  function updateProfileForm(field, value) {
+    setProfileForm((current) => ({ ...current, [field]: value }));
+  }
+
   function updateTeacher(teacherId) {
     const teacher = findTeacher(teachers, teacherId);
     setForm((current) => ({
@@ -127,6 +152,34 @@ export default function StudentWorkspace({ user = {} }) {
       teacherId,
       teacherName: teacher?.name || ''
     }));
+  }
+
+  async function handleProfileSubmit(event) {
+    event.preventDefault();
+    if (!student?.id) return;
+
+    const payload = {
+      phone: profileForm.phone.trim(),
+      gender: profileForm.gender.trim(),
+      birthday: profileForm.birthday,
+      enrolledAt: profileForm.enrolledAt,
+      remark: profileForm.remark.trim()
+    };
+
+    setSavingProfile(true);
+    setError('');
+    setSuccess('');
+    try {
+      const result = await apiPatch('/api/student-workspace/profile', payload);
+      const nextStudent = result.student || { ...student, ...payload };
+      setStudent(nextStudent);
+      setProfileForm(toProfileForm(nextStudent));
+      setSuccess('个人资料已保存，姓名和班级/课程仍由教务端统一维护。');
+    } catch (err) {
+      setError(err.message || '个人资料保存失败');
+    } finally {
+      setSavingProfile(false);
+    }
   }
 
   async function handleSubmit(event) {
@@ -221,6 +274,75 @@ export default function StudentWorkspace({ user = {} }) {
                 </div>
               ))}
             </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <h2>资料补全</h2>
+                <p className="muted">学生可补充联系方式和个人资料；姓名、班级/课程由教务端维护。</p>
+              </div>
+            </div>
+            <form className="form-grid" onSubmit={handleProfileSubmit}>
+              <div className="profile-readonly form-wide">
+                <span>姓名：{student.name || '-'}</span>
+                <span>班级/课程：{student.className || '未分配班级'}</span>
+              </div>
+              <label>
+                手机号
+                <input
+                  value={profileForm.phone}
+                  onChange={(event) => updateProfileForm('phone', event.target.value)}
+                  placeholder="填写常用手机号"
+                  disabled={savingProfile}
+                />
+              </label>
+              <label>
+                性别
+                <select
+                  value={profileForm.gender}
+                  onChange={(event) => updateProfileForm('gender', event.target.value)}
+                  disabled={savingProfile}
+                >
+                  <option value="">暂不填写</option>
+                  <option value="男">男</option>
+                  <option value="女">女</option>
+                  <option value="其他">其他</option>
+                </select>
+              </label>
+              <label>
+                出生日期
+                <input
+                  type="date"
+                  value={profileForm.birthday}
+                  onChange={(event) => updateProfileForm('birthday', event.target.value)}
+                  disabled={savingProfile}
+                />
+              </label>
+              <label>
+                入学日期
+                <input
+                  type="date"
+                  value={profileForm.enrolledAt}
+                  onChange={(event) => updateProfileForm('enrolledAt', event.target.value)}
+                  disabled={savingProfile}
+                />
+              </label>
+              <label className="form-wide">
+                备注
+                <textarea
+                  value={profileForm.remark}
+                  onChange={(event) => updateProfileForm('remark', event.target.value)}
+                  placeholder="补充学习方向、联系偏好或其他说明"
+                  disabled={savingProfile}
+                />
+              </label>
+              <div className="form-actions">
+                <button className="button button-primary" type="submit" disabled={savingProfile}>
+                  {savingProfile ? '正在保存...' : '保存资料'}
+                </button>
+              </div>
+            </form>
           </section>
 
           <div className="workspace-grid">

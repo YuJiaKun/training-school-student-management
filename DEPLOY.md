@@ -61,7 +61,7 @@ sudo nano /etc/training-school-student-management.env
 - `NODE_ENV=production`：生产环境标识。
 - `PORT=4000`：Node 服务监听端口，需要和 Nginx 反代目标一致。当前学生管理系统使用 4000，避免占用老网站 3000 和 Gitea 3001。
 - `DATA_FILE=/var/lib/training-school-student-management/data.json`：业务数据文件路径。
-- `AUTH_ACCOUNTS=...`：登录账号 JSON 数组，上线前必须替换示例密码。
+- `AUTH_ACCOUNTS=...`：登录账号 JSON 数组，上线前必须替换示例密码；老师账号需要通过 `classNames` 配置负责班级，作业大屏只统计这些班级。
 - `COOKIE_SECURE=true`：启用 HTTPS 后建议保持为 `true`。
 - `SESSION_MAX_AGE_SECONDS=604800`：会话有效期，单位秒。
 
@@ -184,7 +184,7 @@ sudo systemctl restart training-school-student-management
 
 - `npm ci` 和 `npm run build` 已成功完成。
 - `/etc/training-school-student-management.env` 已替换示例账号和密码。
-- `AUTH_ACCOUNTS` 未保留 `admin123`、`teacher123`、`student123` 或 `change-me-*` 示例密码。
+- `AUTH_ACCOUNTS` 未保留 `admin123`、`teacher123`、`student123` 或 `change-me-*` 示例密码，老师账号已配置 `classNames`。
 - `DATA_FILE` 所在目录归属为 `training-school:training-school`，服务用户可写。
 - `systemctl status training-school-student-management` 显示服务正在运行。
 - `curl http://127.0.0.1:4000/health` 返回 `{"status":"ok"}`。

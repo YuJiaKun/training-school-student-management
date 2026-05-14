@@ -59,13 +59,33 @@ function csvCell(value) {
   return text;
 }
 
+function normalizeClassItem(item) {
+  const className = String(item?.className || '').trim();
+  if (!className) return null;
+  return { ...item, className };
+}
+
+function classOptionLabel(item) {
+  const count = Number(item.studentCount);
+  return Number.isFinite(count) ? `${item.className}（${count} 名在读）` : item.className;
+}
+
+function summarizeClasses(items) {
+  const names = items.map((item) => item.className).filter(Boolean);
+  if (!names.length) return '暂无班级/课程，请先新增后再选择或导入。';
+  const visible = names.slice(0, 8).join('、');
+  return names.length > 8 ? `${visible} 等 ${names.length} 个班级/课程` : visible;
+}
+
 export default function StudentsPage() {
   const [students, setStudents] = useState([]);
+  const [classes, setClasses] = useState([]);
   const [total, setTotal] = useState(0);
   const [keyword, setKeyword] = useState('');
   const [status, setStatus] = useState('');
   const [accountStatus, setAccountStatus] = useState('');
   const [form, setForm] = useState(emptyForm);
+  const [newClassName, setNewClassName] = useState('');
   const [importText, setImportText] = useState('');
   const [importFileName, setImportFileName] = useState('');
   const [importPreview, setImportPreview] = useState(null);
@@ -75,6 +95,7 @@ export default function StudentsPage() {
   const [editingId, setEditingId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [creatingClass, setCreatingClass] = useState(false);
   const [generatingAccounts, setGeneratingAccounts] = useState(false);
   const [resettingAccountId, setResettingAccountId] = useState(null);
   const [error, setError] = useState('');
@@ -82,6 +103,22 @@ export default function StudentsPage() {
   const filters = useMemo(() => ({ keyword, status, accountStatus }), [accountStatus, keyword, status]);
   const exportUrl = buildPath('/api/export/students', filters);
   const accountExportUrl = buildPath('/api/export/student-accounts', filters);
+  const classOptions = useMemo(() => {
+    const seen = new Set();
+    const options = [];
+    classes.forEach((item) => {
+      const option = normalizeClassItem(item);
+      if (!option || seen.has(option.className)) return;
+      seen.add(option.className);
+      options.push(option);
+    });
+    const currentClassName = form.className.trim();
+    if (currentClassName && !seen.has(currentClassName)) {
+      options.unshift({ id: `current-${currentClassName}`, className: currentClassName });
+    }
+    return options;
+  }, [classes, form.className]);
+  const classSummary = useMemo(() => summarizeClasses(classes), [classes]);
 
   async function loadStudents() {
     setLoading(true);
@@ -97,9 +134,25 @@ export default function StudentsPage() {
     }
   }
 
+  async function loadClasses() {
+    try {
+      const data = await apiGet('/api/classes');
+      const items = (data.items || []).map(normalizeClassItem).filter(Boolean);
+      setClasses(items);
+      return items;
+    } catch (err) {
+      setError(err.message || '班级列表加载失败');
+      return [];
+    }
+  }
+
   useEffect(() => {
     loadStudents();
   }, [filters]);
+
+  useEffect(() => {
+    loadClasses();
+  }, []);
 
   function updateForm(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -127,15 +180,47 @@ export default function StudentsPage() {
     event.preventDefault();
     setError('');
     try {
+      const payload = {
+        ...form,
+        name: form.name.trim(),
+        phone: form.phone.trim(),
+        gender: form.gender.trim(),
+        className: form.className.trim(),
+        remark: form.remark.trim()
+      };
       if (editingId) {
-        await apiPatch(`/api/students/${editingId}`, form);
+        await apiPatch(`/api/students/${editingId}`, payload);
       } else {
-        await apiPost('/api/students', form);
+        await apiPost('/api/students', payload);
       }
       resetForm();
       await loadStudents();
     } catch (err) {
       setError(err.message || '学生信息保存失败');
+    }
+  }
+
+  async function handleCreateClass() {
+    const className = newClassName.trim();
+    if (!className) {
+      setError('请先填写班级/课程名称');
+      return;
+    }
+
+    setCreatingClass(true);
+    setError('');
+    setImportMessage('');
+    try {
+      const result = await apiPost('/api/classes', { className });
+      const selectedClassName = result.class?.className || className;
+      setNewClassName('');
+      setForm((current) => ({ ...current, className: selectedClassName }));
+      await loadClasses();
+      setImportMessage(`已新增班级/课程：${selectedClassName}`);
+    } catch (err) {
+      setError(err.message || '新增班级/课程失败');
+    } finally {
+      setCreatingClass(false);
     }
   }
 
@@ -248,7 +333,7 @@ export default function StudentsPage() {
         <div>
           <p className="page-kicker">学员档案</p>
           <h1>学生管理</h1>
-          <p className="page-description">维护学生基础资料，筛选在读或归档状态，并导出当前结果。</p>
+          <p className="page-description">新增学生时只需要先确认姓名和班级/课程，联系方式与其他资料可由学生后续补全。</p>
         </div>
         <div className="form-actions">
           <a className="button button-secondary" href="/api/students/import/template.csv" download>下载导入模板</a>
@@ -295,6 +380,11 @@ export default function StudentsPage() {
           />
           导入后自动生成学生账号
         </label>
+        <div className="class-helper form-wide">
+          <strong>可用班级/课程</strong>
+          <span>{classSummary}</span>
+          <small>导入时必填姓名和班级/课程；手机号、性别、出生日期、入学日期、备注都可以留空，由学生登录后自行补全。</small>
+        </div>
         <label className="form-wide">
           粘贴导入内容
           <textarea
@@ -305,7 +395,7 @@ export default function StudentsPage() {
               setImportPreview(null);
               setGeneratedAccounts([]);
             }}
-            placeholder="姓名,手机号,性别,出生日期,班级/课程,入学日期,备注"
+            placeholder={'姓名,班级/课程,手机号,性别,出生日期,入学日期,备注\n张三,前端就业班,,男,2002-06-01,,学生端可后续补全'}
           />
         </label>
         <div className="form-actions">
@@ -324,15 +414,15 @@ export default function StudentsPage() {
             </button>
           ) : null}
           {importPreview ? (
-            <span className="muted">可导入 {importPreview.validCount} 条，需修正 {importPreview.invalidCount} 条</span>
+            <span className="muted">可导入 {importPreview.validCount} 条，需修正 {importPreview.invalidCount} 条；仅姓名和班级/课程为必填</span>
           ) : null}
         </div>
         {importPreview?.rows?.length ? (
           <div className="import-preview form-wide">
             {importPreview.rows.slice(0, 5).map((row) => (
               <div className={row.errors.length ? 'preview-row has-error' : 'preview-row'} key={row.rowNumber}>
-                <strong>第 {row.rowNumber} 行：{row.student.name || '未填写姓名'}</strong>
-                <span>{row.errors.length ? row.errors.join('、') : '可导入'}</span>
+                <strong>第 {row.rowNumber} 行：{row.student.name || '未填写姓名'} / {row.student.className || '未选择班级'}</strong>
+                <span>{row.errors.length ? row.errors.join('、') : '姓名和班级有效，其余资料可后续补全'}</span>
               </div>
             ))}
           </div>
@@ -362,13 +452,68 @@ export default function StudentsPage() {
 
       <form className="panel form-grid" onSubmit={handleSubmit}>
         <h2>{editingId ? '编辑学生' : '新增学生'}</h2>
-        <input required value={form.name} onChange={(event) => updateForm('name', event.target.value)} placeholder="姓名" />
-        <input required value={form.phone} onChange={(event) => updateForm('phone', event.target.value)} placeholder="手机号" />
-        <input value={form.gender} onChange={(event) => updateForm('gender', event.target.value)} placeholder="性别" />
-        <input type="date" value={form.birthday} onChange={(event) => updateForm('birthday', event.target.value)} />
-        <input value={form.className} onChange={(event) => updateForm('className', event.target.value)} placeholder="班级/课程" />
-        <input type="date" value={form.enrolledAt} onChange={(event) => updateForm('enrolledAt', event.target.value)} />
-        <textarea value={form.remark} onChange={(event) => updateForm('remark', event.target.value)} placeholder="备注" />
+        <p className="form-hint form-wide">必填只有“姓名、班级/课程”。手机号、性别、出生日期、入学日期和备注可留空，学生后续在学生端自行补全。</p>
+        <label>
+          姓名
+          <input required value={form.name} onChange={(event) => updateForm('name', event.target.value)} placeholder="必填：学生姓名" />
+        </label>
+        <label>
+          班级/课程
+          <select required value={form.className} onChange={(event) => updateForm('className', event.target.value)}>
+            <option value="">请选择班级/课程</option>
+            {classOptions.map((item) => (
+              <option key={`${item.id || 'class'}-${item.className}`} value={item.className}>
+                {classOptionLabel(item)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          手机号
+          <input value={form.phone} onChange={(event) => updateForm('phone', event.target.value)} placeholder="学生后续补全，可选" />
+        </label>
+        <div className="inline-create form-wide">
+          <label>
+            新增班级/课程
+            <input
+              value={newClassName}
+              onChange={(event) => setNewClassName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  handleCreateClass();
+                }
+              }}
+              placeholder="例如：前端就业班"
+              disabled={creatingClass}
+            />
+          </label>
+          <button className="button button-secondary" type="button" onClick={handleCreateClass} disabled={creatingClass || !newClassName.trim()}>
+            {creatingClass ? '正在新增...' : '新增并选择'}
+          </button>
+          <span className="muted">新增成功后会刷新班级列表，并自动选中该班级。</span>
+        </div>
+        <label>
+          性别
+          <select value={form.gender} onChange={(event) => updateForm('gender', event.target.value)}>
+            <option value="">学生后续补全</option>
+            <option value="男">男</option>
+            <option value="女">女</option>
+            <option value="其他">其他</option>
+          </select>
+        </label>
+        <label>
+          出生日期
+          <input type="date" value={form.birthday} onChange={(event) => updateForm('birthday', event.target.value)} />
+        </label>
+        <label>
+          入学日期
+          <input type="date" value={form.enrolledAt} onChange={(event) => updateForm('enrolledAt', event.target.value)} />
+        </label>
+        <label className="form-wide">
+          备注
+          <textarea value={form.remark} onChange={(event) => updateForm('remark', event.target.value)} placeholder="可选，学生后续也可补充" />
+        </label>
         <div className="form-actions">
           <button className="button button-primary" type="submit">{editingId ? '保存修改' : '新增学生'}</button>
           {editingId ? <button className="button button-secondary" type="button" onClick={resetForm}>取消编辑</button> : null}

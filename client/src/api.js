@@ -4,9 +4,14 @@ const AUTH_EXPIRED_EVENT = 'auth:expired';
 
 const ERROR_TEXT_MAP = {
   unauthorized: LOGIN_EXPIRED_TEXT,
+  forbidden: '当前账号没有访问权限',
   'invalid credentials': '账号或密码不正确',
   'not found': '请求的资源不存在',
-  'name and phone are required': '请填写学生姓名和手机号',
+  'name and phone are required': '请填写学生姓名和班级/课程',
+  'student name and class are required': '请填写学生姓名和班级/课程',
+  'class name is required': '请填写班级/课程名称',
+  'class not found': '未找到对应班级/课程，请先新增班级',
+  'student phone already exists': '该手机号已绑定其他学生，请更换后再保存',
   'student not found': '未找到对应学生',
   'homework record not found': '未找到对应作业记录',
   'homework assignment not found': '未找到对应作业任务',

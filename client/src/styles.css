@@ -59,6 +59,7 @@ button {
 
 button:disabled,
 input:disabled,
+select:disabled,
 textarea:disabled {
   cursor: not-allowed;
   opacity: 0.62;
@@ -544,6 +545,63 @@ textarea:focus {
 .checkbox-field input {
   width: auto;
   min-height: auto;
+}
+
+.class-helper,
+.profile-readonly {
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+}
+
+.class-helper {
+  display: grid;
+  gap: 5px;
+}
+
+.class-helper strong {
+  color: #334155;
+}
+
+.class-helper span,
+.class-helper small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.profile-readonly {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.profile-readonly span {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  padding: 0 10px;
+  font-weight: 800;
+}
+
+.inline-create {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 1fr);
+  align-items: end;
+  gap: 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+}
+
+.inline-create .muted {
+  align-self: center;
+  margin: 0;
 }
 
 .account-preview {
@@ -1243,6 +1301,104 @@ tr:last-child td {
   font-weight: 900;
 }
 
+.admin-dashboard-grid {
+  grid-template-areas:
+    "employment result pending"
+    "trend hired recent";
+}
+
+.employment-panel {
+  grid-area: employment;
+}
+
+.interview-result-panel {
+  grid-area: result;
+}
+
+.pending-schedule-panel {
+  grid-area: pending;
+}
+
+.interview-trend-panel {
+  grid-area: trend;
+}
+
+.hired-status-panel {
+  grid-area: hired;
+}
+
+.recent-interview-panel {
+  grid-area: recent;
+}
+
+.screen-list {
+  min-height: 0;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.screen-list-item {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--screen-line);
+  border-radius: 8px;
+  background: var(--screen-panel-soft);
+  padding: 10px 11px;
+}
+
+.screen-list-item > div {
+  min-width: 0;
+}
+
+.screen-list-item strong {
+  display: block;
+  color: var(--screen-text);
+  overflow-wrap: anywhere;
+}
+
+.screen-list-item span {
+  display: block;
+  margin-top: 4px;
+  color: var(--screen-muted);
+  font-size: 12px;
+}
+
+.screen-state {
+  flex: 0 0 auto;
+  min-height: 26px;
+  display: inline-flex !important;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0 10px;
+  font-weight: 900;
+}
+
+.screen-list-item .missing-tag,
+.screen-list-item .screen-state {
+  margin-top: 0;
+}
+
+.screen-state-pending {
+  background: rgba(245, 158, 11, 0.16);
+  color: #fde68a !important;
+}
+
+.screen-state-passed {
+  background: rgba(16, 185, 129, 0.14);
+  color: #bbf7d0 !important;
+}
+
+.screen-state-failed {
+  background: rgba(248, 113, 113, 0.14);
+  color: #fecaca !important;
+}
+
 @media (max-width: 1320px) {
   .analytics-metric-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1255,6 +1411,13 @@ tr:last-child td {
       "completion assignment"
       "distribution class"
       "missing risk";
+  }
+
+  .admin-dashboard-grid {
+    grid-template-areas:
+      "employment result"
+      "trend hired"
+      "pending recent";
   }
 }
 
@@ -1370,6 +1533,13 @@ tr:last-child td {
       "missing risk";
   }
 
+  .admin-dashboard-grid {
+    grid-template-areas:
+      "employment result"
+      "trend hired"
+      "pending recent";
+  }
+
   .form-grid,
   .schedule-form,
   .account-chip-list {
@@ -1434,9 +1604,23 @@ tr:last-child td {
       "missing";
   }
 
+  .admin-dashboard-grid {
+    grid-template-areas:
+      "employment"
+      "result"
+      "trend"
+      "hired"
+      "pending"
+      "recent";
+  }
+
   .homework-upload-form {
     width: 100%;
     flex-basis: auto;
+  }
+
+  .inline-create {
+    grid-template-columns: 1fr;
   }
 }
 

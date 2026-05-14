@@ -21,7 +21,7 @@ const NAV_ITEMS = [
   { key: 'dashboard', label: '工作台', roles: ['admin', 'teacher', 'student'] },
   { key: 'students', label: '学生管理', roles: ['admin'] },
   { key: 'homework', label: '作业跟进', roles: ['admin', 'teacher'] },
-  { key: 'homework-analytics', label: '作业大屏', roles: ['admin', 'teacher'] },
+  { key: 'homework-analytics', label: '作业大屏', roles: ['teacher'] },
   { key: 'interviews', label: '面试记录', roles: ['admin'] },
   { key: 'schedules', label: '排期总览', roles: ['admin', 'teacher', 'student'] },
   { key: 'schedule-queue', label: '排期审批', roles: ['admin'] }

@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 
 function createDatabase(options = {}) {
   const filePath = options.filePath || null;
@@ -15,12 +15,14 @@ function createDatabase(options = {}) {
     homeworkRecords: state.homeworkRecords,
     interviewRecords: state.interviewRecords,
     interviewSchedules: state.interviewSchedules,
+    classes: state.classes,
     authAccounts: state.authAccounts,
     nextStudentId: state.nextStudentId,
     nextHomeworkAssignmentId: state.nextHomeworkAssignmentId,
     nextHomeworkId: state.nextHomeworkId,
     nextInterviewId: state.nextInterviewId,
     nextInterviewScheduleId: state.nextInterviewScheduleId,
+    nextClassId: state.nextClassId,
     nextAuthAccountId: state.nextAuthAccountId,
     save() {
       if (!filePath) return;
@@ -31,12 +33,14 @@ function createDatabase(options = {}) {
         homeworkRecords: this.homeworkRecords,
         interviewRecords: this.interviewRecords,
         interviewSchedules: this.interviewSchedules,
+        classes: this.classes,
         authAccounts: this.authAccounts,
         nextStudentId: this.nextStudentId,
         nextHomeworkAssignmentId: this.nextHomeworkAssignmentId,
         nextHomeworkId: this.nextHomeworkId,
         nextInterviewId: this.nextInterviewId,
         nextInterviewScheduleId: this.nextInterviewScheduleId,
+        nextClassId: this.nextClassId,
         nextAuthAccountId: this.nextAuthAccountId
       }, null, 2);
       const tmpPath = `${filePath}.tmp`;
@@ -75,12 +79,14 @@ function createEmptyState() {
     homeworkRecords: [],
     interviewRecords: [],
     interviewSchedules: [],
+    classes: [],
     authAccounts: [],
     nextStudentId: 1,
     nextHomeworkAssignmentId: 1,
     nextHomeworkId: 1,
     nextInterviewId: 1,
     nextInterviewScheduleId: 1,
+    nextClassId: 1,
     nextAuthAccountId: 1
   };
 }
@@ -92,6 +98,12 @@ function normalizeState(raw) {
   const interviewRecords = normalizeRecords(raw.interviewRecords || [], 'studentId');
   const interviewSchedules = normalizeRecords(raw.interviewSchedules || [], 'studentId');
   const authAccounts = normalizeAuthAccounts(raw.authAccounts || []);
+  const classes = normalizeClasses(raw.classes || [], {
+    students,
+    homeworkAssignments,
+    homeworkRecords,
+    authAccounts
+  });
 
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -100,12 +112,14 @@ function normalizeState(raw) {
     homeworkRecords,
     interviewRecords,
     interviewSchedules,
+    classes,
     authAccounts,
     nextStudentId: nextId(raw.nextStudentId, students),
     nextHomeworkAssignmentId: nextId(raw.nextHomeworkAssignmentId, homeworkAssignments),
     nextHomeworkId: nextId(raw.nextHomeworkId, homeworkRecords),
     nextInterviewId: nextId(raw.nextInterviewId, interviewRecords),
     nextInterviewScheduleId: nextId(raw.nextInterviewScheduleId, interviewSchedules),
+    nextClassId: nextId(raw.nextClassId, classes),
     nextAuthAccountId: nextId(raw.nextAuthAccountId, authAccounts)
   };
 }
@@ -165,10 +179,94 @@ function normalizeAuthAccounts(accounts) {
     role: account.role || 'student',
     studentId: account.studentId ? Number(account.studentId) : null,
     teacherId: account.teacherId ? Number(account.teacherId) : null,
+    teacherName: account.teacherName || '',
+    classNames: Array.isArray(account.classNames)
+      ? account.classNames.map((className) => String(className || '').trim()).filter(Boolean)
+      : [],
+    participatesInScheduling: account.participatesInScheduling === true,
     status: account.status || 'active',
     createdAt: account.createdAt || '',
     passwordUpdatedAt: account.passwordUpdatedAt || ''
   })).filter((account) => Number.isInteger(account.id) && account.id > 0);
+}
+
+function normalizeClasses(classes, sources) {
+  const byName = new Map();
+  let nextSyntheticId = 1;
+  for (const item of classes) {
+    const className = String(item.className || item.name || '').trim();
+    if (!className) continue;
+    const record = {
+      id: Number(item.id) || nextSyntheticId++,
+      className,
+      createdAt: item.createdAt || '',
+      createdByRole: item.createdByRole || '',
+      createdByName: item.createdByName || '',
+      teacherIds: normalizeIdList(item.teacherIds),
+      teacherUsernames: normalizeStringList(item.teacherUsernames)
+    };
+    byName.set(className, record);
+  }
+  nextSyntheticId = Array.from(byName.values()).reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) + 1;
+
+  for (const student of sources.students || []) {
+    addClassName(byName, student.className, () => nextSyntheticId++);
+  }
+  for (const assignment of sources.homeworkAssignments || []) {
+    addClassName(byName, assignment.className, () => nextSyntheticId++);
+  }
+  for (const record of sources.homeworkRecords || []) {
+    addClassName(byName, record.className, () => nextSyntheticId++);
+  }
+  for (const account of sources.authAccounts || []) {
+    for (const className of account.classNames || []) {
+      const item = addClassName(byName, className, () => nextSyntheticId++);
+      if (account.teacherId) addUnique(item.teacherIds, Number(account.teacherId));
+      if (account.username) addUnique(item.teacherUsernames, account.username);
+    }
+  }
+
+  return Array.from(byName.values())
+    .map((item, index) => ({
+      ...item,
+      id: Number.isInteger(item.id) && item.id > 0 ? item.id : index + 1
+    }))
+    .sort((left, right) => left.id - right.id);
+}
+
+function addClassName(byName, value, nextId) {
+  const className = String(value || '').trim();
+  if (!className) return null;
+  if (!byName.has(className)) {
+    byName.set(className, {
+      id: nextId(),
+      className,
+      createdAt: '',
+      createdByRole: '',
+      createdByName: '',
+      teacherIds: [],
+      teacherUsernames: []
+    });
+  }
+  return byName.get(className);
+}
+
+function normalizeIdList(values) {
+  if (!Array.isArray(values)) return [];
+  return values.map((value) => Number(value)).filter((value, index, list) =>
+    Number.isInteger(value) && value > 0 && list.indexOf(value) === index
+  );
+}
+
+function normalizeStringList(values) {
+  if (!Array.isArray(values)) return [];
+  return values.map((value) => String(value || '').trim()).filter((value, index, list) =>
+    value && list.indexOf(value) === index
+  );
+}
+
+function addUnique(list, value) {
+  if (!list.includes(value)) list.push(value);
 }
 
 function nextId(rawNextId, records) {

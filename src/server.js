@@ -97,7 +97,13 @@ function createServerApp({
 
           if (req.method === 'GET' && url.pathname === '/api/classes') {
             if (!authorize(res, session, ['admin', 'teacher'])) return;
-            sendJson(res, 200, app.listClasses());
+            sendJson(res, 200, app.listClasses(session.role === 'teacher' ? { classNames: session.classNames || [] } : {}));
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/classes') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            await mutateJson(req, res, 201, (body) => ({ class: app.createClass(body, session) }), app, bodyOptions);
             return;
           }
 
@@ -111,6 +117,12 @@ function createServerApp({
             return;
           }
 
+          if (req.method === 'PATCH' && url.pathname === '/api/student-workspace/profile') {
+            if (!authorize(res, session, ['student'])) return;
+            await mutateJson(req, res, 200, (body) => ({ student: app.updateStudentProfile(session, body) }), app, bodyOptions);
+            return;
+          }
+
           if (req.method === 'GET' && url.pathname === '/api/dashboard/stats') {
             if (!authorize(res, session, ['admin'])) return;
             sendJson(res, 200, app.getDashboardStats());
@@ -118,8 +130,13 @@ function createServerApp({
           }
 
           if (req.method === 'GET' && url.pathname === '/api/homework-analytics') {
-            if (!authorize(res, session, ['admin', 'teacher'])) return;
-            sendJson(res, 200, app.getHomeworkAnalytics(readHomeworkAssignmentFilters(url)));
+            if (!authorize(res, session, ['teacher'])) return;
+            const filters = readTeacherHomeworkAnalyticsFilters(url, session);
+            if (!filters) {
+              sendJson(res, 403, { error: 'forbidden' });
+              return;
+            }
+            sendJson(res, 200, app.getHomeworkAnalytics(filters));
             return;
           }
 
@@ -565,6 +582,17 @@ function readHomeworkAssignmentFilters(url) {
   };
 }
 
+function readTeacherHomeworkAnalyticsFilters(url, session) {
+  const requestedClassName = url.searchParams.get('className') || '';
+  const classNames = Array.isArray(session.classNames) ? session.classNames : [];
+  if (!classNames.length) return { classNames: [] };
+  if (requestedClassName) {
+    if (!classNames.includes(requestedClassName)) return null;
+    return { className: requestedClassName, classNames };
+  }
+  return { classNames };
+}
+
 function readHomeworkFilters(url) {
   return {
     studentId: url.searchParams.get('studentId') || undefined,
@@ -665,7 +693,8 @@ function sessionToUser(session) {
     username: session.username,
     role: session.role,
     teacherId: session.teacherId || null,
-    studentId: session.studentId || null
+    studentId: session.studentId || null,
+    classNames: Array.isArray(session.classNames) ? session.classNames : []
   };
 }
 

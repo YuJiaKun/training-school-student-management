@@ -85,6 +85,8 @@ export default function HomeworkAnalyticsPage() {
   const overview = analytics.overview || emptyAnalytics.overview;
   const latestAssignment = analytics.latestAssignment;
   const hasRecords = Number(overview.recordCount || 0) > 0;
+  const hasResponsibleClasses = classes.length > 0;
+  const scopeLabel = className || (hasResponsibleClasses ? '全部负责班级' : '未配置负责班级');
   const classRanking = useMemo(
     () => [...(analytics.classes || [])].sort((left, right) => Number(right.completionRate || 0) - Number(left.completionRate || 0)),
     [analytics.classes]
@@ -103,7 +105,7 @@ export default function HomeworkAnalyticsPage() {
     {
       label: '在读人数',
       value: overview.studentCount,
-      hint: `当前范围：${className || '全部班级'}`,
+      hint: `当前范围：${scopeLabel}`,
       icon: Users,
       tone: 'cyan'
     },
@@ -144,8 +146,8 @@ export default function HomeworkAnalyticsPage() {
           <div className="analytics-title-block">
             <span className="analytics-live-dot">LIVE</span>
             <div>
-              <h1>作业完成大屏</h1>
-              <p>聚合作业提交、班级完成率、学生风险和最新缺交名单，只看有没有做。</p>
+              <h1>班级作业完成大屏</h1>
+              <p>只聚合当前老师负责班级的提交情况、学生风险和最新缺交名单。</p>
             </div>
           </div>
 
@@ -153,7 +155,7 @@ export default function HomeworkAnalyticsPage() {
             <label className="analytics-select">
               <Filter size={16} aria-hidden="true" />
               <select value={className} onChange={(event) => setClassName(event.target.value)} aria-label="班级筛选">
-                <option value="">全部班级</option>
+                <option value="">{hasResponsibleClasses ? '全部负责班级' : '未配置负责班级'}</option>
                 {classes.map((item) => (
                   <option key={item.className} value={item.className}>{item.className}</option>
                 ))}
@@ -172,7 +174,7 @@ export default function HomeworkAnalyticsPage() {
 
         <div className="analytics-sync-row">
           <span><Clock3 size={15} aria-hidden="true" />最近更新：{formatDateTime(lastUpdatedAt)}</span>
-          <span><GraduationCap size={15} aria-hidden="true" />统计范围：{className || '全部班级'}</span>
+          <span><GraduationCap size={15} aria-hidden="true" />统计范围：{scopeLabel}</span>
         </div>
 
         {error ? <div className="screen-alert"><AlertTriangle size={18} aria-hidden="true" />{error}</div> : null}
@@ -185,7 +187,7 @@ export default function HomeworkAnalyticsPage() {
         </section>
 
         {!hasRecords && !loading ? (
-          <EmptyState text="暂无作业提交数据。发布作业并生成待提交名单后，大屏会自动展示完成情况。" />
+          <EmptyState text={hasResponsibleClasses ? '暂无作业提交数据。发布作业并生成待提交名单后，大屏会自动展示完成情况。' : '当前老师账号未配置负责班级，请联系管理员在账号配置中补充 classNames。'} />
         ) : null}
 
         <section className="analytics-dashboard-grid">
