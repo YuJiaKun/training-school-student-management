@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { apiGet, apiPatch, apiPost } from '../api.js';
+import { apiDelete, apiGet, apiPatch, apiPost } from '../api.js';
 import StatusBadge from '../components/StatusBadge.jsx';
 import { buildPath } from '../utils/url.js';
 
@@ -84,9 +84,12 @@ export default function StudentsPage() {
   const [keyword, setKeyword] = useState('');
   const [status, setStatus] = useState('');
   const [accountStatus, setAccountStatus] = useState('');
+  const [className, setClassName] = useState('');
+  const [hasSearched, setHasSearched] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [newClassName, setNewClassName] = useState('');
   const [importText, setImportText] = useState('');
+  const [importDefaultClassName, setImportDefaultClassName] = useState('');
   const [importFileName, setImportFileName] = useState('');
   const [importPreview, setImportPreview] = useState(null);
   const [importMessage, setImportMessage] = useState('');
@@ -100,7 +103,7 @@ export default function StudentsPage() {
   const [resettingAccountId, setResettingAccountId] = useState(null);
   const [error, setError] = useState('');
 
-  const filters = useMemo(() => ({ keyword, status, accountStatus }), [accountStatus, keyword, status]);
+  const filters = useMemo(() => ({ keyword, status, accountStatus, className }), [accountStatus, className, keyword, status]);
   const exportUrl = buildPath('/api/export/students', filters);
   const accountExportUrl = buildPath('/api/export/student-accounts', filters);
   const classOptions = useMemo(() => {
@@ -147,12 +150,40 @@ export default function StudentsPage() {
   }
 
   useEffect(() => {
-    loadStudents();
-  }, [filters]);
-
-  useEffect(() => {
     loadClasses();
   }, []);
+
+  function hasSearchCondition() {
+    return Boolean(keyword.trim() || status || accountStatus || className);
+  }
+
+  async function handleSearch() {
+    if (!hasSearchCondition()) {
+      setHasSearched(false);
+      setStudents([]);
+      setTotal(0);
+      setError('');
+      return;
+    }
+    setHasSearched(true);
+    await loadStudents();
+  }
+
+  function resetSearch() {
+    setKeyword('');
+    setStatus('');
+    setAccountStatus('');
+    setClassName('');
+    setHasSearched(false);
+    setStudents([]);
+    setTotal(0);
+  }
+
+  async function refreshStudentsIfNeeded() {
+    if (!hasSearched && !hasSearchCondition()) return;
+    setHasSearched(true);
+    await loadStudents();
+  }
 
   function updateForm(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -194,7 +225,7 @@ export default function StudentsPage() {
         await apiPost('/api/students', payload);
       }
       resetForm();
-      await loadStudents();
+      await refreshStudentsIfNeeded();
     } catch (err) {
       setError(err.message || '学生信息保存失败');
     }
@@ -231,7 +262,7 @@ export default function StudentsPage() {
     setGeneratedAccounts([]);
     setImporting(true);
     try {
-      const preview = await apiPost('/api/students/import/preview', { text: importText });
+      const preview = await apiPost('/api/students/import/preview', buildImportPayload());
       setImportPreview(preview);
     } catch (err) {
       setError(err.message || '导入预览失败');
@@ -246,7 +277,7 @@ export default function StudentsPage() {
     setGeneratedAccounts([]);
     setImporting(true);
     try {
-      const result = await apiPost('/api/students/import/commit', { text: importText, generateAccounts });
+      const result = await apiPost('/api/students/import/commit', { ...buildImportPayload(), generateAccounts });
       setImportPreview(result);
       setGeneratedAccounts(result.accounts || []);
       const accountText = generateAccounts
@@ -258,12 +289,21 @@ export default function StudentsPage() {
         setImportText('');
         setImportFileName('');
       }
-      await loadStudents();
+      await refreshStudentsIfNeeded();
     } catch (err) {
       setError(err.message || '导入学生失败');
     } finally {
       setImporting(false);
     }
+  }
+
+  function buildImportPayload() {
+    if (importFileName) return { text: importText };
+    return {
+      mode: 'simplePaste',
+      text: importText,
+      defaultClassName: importDefaultClassName
+    };
   }
 
   async function handleImportFile(event) {
@@ -292,7 +332,7 @@ export default function StudentsPage() {
       const result = await apiPost('/api/students/accounts/generate', { filters });
       setGeneratedAccounts(result.accounts || []);
       setImportMessage(`已生成 ${result.accounts?.length || 0} 个账号，跳过 ${result.skippedCount || 0} 名已有账号学生`);
-      await loadStudents();
+      await refreshStudentsIfNeeded();
     } catch (err) {
       setError(err.message || '批量生成账号失败');
     } finally {
@@ -309,9 +349,25 @@ export default function StudentsPage() {
       const result = await apiPost('/api/students/accounts/reset', { studentIds: [student.id] });
       setGeneratedAccounts(result.accounts || []);
       setImportMessage(`已重置 ${result.accounts?.length || 0} 个账号密码，跳过 ${result.skippedCount || 0} 名学生`);
-      await loadStudents();
+      await refreshStudentsIfNeeded();
     } catch (err) {
       setError(err.message || '重置账号密码失败');
+    } finally {
+      setResettingAccountId(null);
+    }
+  }
+
+  async function disableStudentAccount(student) {
+    setError('');
+    setImportMessage('');
+    setGeneratedAccounts([]);
+    setResettingAccountId(student.id);
+    try {
+      await apiDelete(`/api/students/${student.id}/account`);
+      setImportMessage(`已停用 ${student.name} 的学生账号，学生档案和历史记录已保留。`);
+      await refreshStudentsIfNeeded();
+    } catch (err) {
+      setError(err.message || '停用学生账号失败');
     } finally {
       setResettingAccountId(null);
     }
@@ -321,7 +377,7 @@ export default function StudentsPage() {
     setError('');
     try {
       await apiPost(`/api/students/${student.id}/archive`, {});
-      await loadStudents();
+      await refreshStudentsIfNeeded();
     } catch (err) {
       setError(err.message || '归档学生失败');
     }
@@ -343,7 +399,13 @@ export default function StudentsPage() {
       </div>
 
       <div className="toolbar">
-        <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="搜索姓名或手机号" />
+        <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="搜索姓名、手机号" />
+        <select value={className} onChange={(event) => setClassName(event.target.value)}>
+          <option value="">选择班级/课程</option>
+          {classOptions.map((item) => (
+            <option key={`filter-${item.className}`} value={item.className}>{item.className}</option>
+          ))}
+        </select>
         <select value={status} onChange={(event) => setStatus(event.target.value)}>
           <option value="">全部状态</option>
           <option value="active">在读</option>
@@ -354,6 +416,10 @@ export default function StudentsPage() {
           <option value="missing">仅看未生成账号</option>
           <option value="generated">仅看已生成账号</option>
         </select>
+        <button className="button button-primary" type="button" onClick={handleSearch} disabled={loading}>
+          {loading ? '正在搜索...' : '搜索'}
+        </button>
+        <button className="button button-secondary" type="button" onClick={resetSearch}>清空</button>
         <button type="button" onClick={generateAccountsForCurrentStudents} disabled={generatingAccounts || loading || !students.length}>
           {generatingAccounts ? '正在生成账号...' : '批量生成账号'}
         </button>
@@ -365,12 +431,13 @@ export default function StudentsPage() {
       <form className="panel form-grid" onSubmit={previewImport}>
         <h2>批量导入学生</h2>
         <label>
-          上传学生表格
-          <input type="file" accept=".csv,text/csv,text/plain" onChange={handleImportFile} />
-        </label>
-        <label>
-          文件名称
-          <input value={importFileName || '未选择文件'} readOnly />
+          默认班级/课程
+          <select value={importDefaultClassName} onChange={(event) => setImportDefaultClassName(event.target.value)}>
+            <option value="">粘贴内容里填写班级</option>
+            {classOptions.map((item) => (
+              <option key={`import-${item.className}`} value={item.className}>{item.className}</option>
+            ))}
+          </select>
         </label>
         <label className="checkbox-field">
           <input
@@ -383,10 +450,10 @@ export default function StudentsPage() {
         <div className="class-helper form-wide">
           <strong>可用班级/课程</strong>
           <span>{classSummary}</span>
-          <small>导入时必填姓名和班级/课程；手机号、性别、出生日期、入学日期、备注都可以留空，由学生登录后自行补全。</small>
+          <small>推荐直接从 Excel/WPS 复制两列：姓名、班级/课程；如果上方选择了默认班级，也可以只粘贴姓名列。手机号等资料由学生登录后补全。</small>
         </div>
         <label className="form-wide">
-          粘贴导入内容
+          粘贴学生名单
           <textarea
             value={importText}
             onChange={(event) => {
@@ -395,9 +462,22 @@ export default function StudentsPage() {
               setImportPreview(null);
               setGeneratedAccounts([]);
             }}
-            placeholder={'姓名,班级/课程,手机号,性别,出生日期,入学日期,备注\n张三,前端就业班,,男,2002-06-01,,学生端可后续补全'}
+            placeholder={importDefaultClassName ? '张三\n李四\n王五' : '张三\t前端就业班\n李四\tJava 就业班'}
           />
         </label>
+        <details className="form-wide advanced-import">
+          <summary>兼容旧 CSV 上传</summary>
+          <div className="inline-create">
+            <label>
+              上传 CSV/TXT
+              <input type="file" accept=".csv,text/csv,text/plain" onChange={handleImportFile} />
+            </label>
+            <label>
+              文件名称
+              <input value={importFileName || '未选择文件'} readOnly />
+            </label>
+          </div>
+        </details>
         <div className="form-actions">
           <button className="button button-secondary" type="submit" disabled={importing || !importText.trim()}>预览导入</button>
           <button
@@ -520,7 +600,9 @@ export default function StudentsPage() {
         </div>
       </form>
 
-      <div className="table-summary">{loading ? '正在加载学生...' : `共 ${total} 名学生`}</div>
+      <div className="table-summary">
+        {!hasSearched ? '默认不展示全部学生，请输入姓名/手机号、选择班级或账号状态后搜索。' : (loading ? '正在加载学生...' : `共 ${total} 名学生`)}
+      </div>
       <div className="table-wrap">
         <table>
           <thead>
@@ -553,9 +635,14 @@ export default function StudentsPage() {
                 <td className="table-actions">
                   <button type="button" onClick={() => startEdit(student)}>编辑</button>
                   {student.hasAccount ? (
-                    <button type="button" onClick={() => resetStudentPassword(student)} disabled={resettingAccountId === student.id}>
-                      {resettingAccountId === student.id ? '重置中...' : '重置密码'}
-                    </button>
+                    <>
+                      <button type="button" onClick={() => resetStudentPassword(student)} disabled={resettingAccountId === student.id}>
+                        {resettingAccountId === student.id ? '处理中...' : '重置密码'}
+                      </button>
+                      <button type="button" onClick={() => disableStudentAccount(student)} disabled={resettingAccountId === student.id}>
+                        停用账号
+                      </button>
+                    </>
                   ) : null}
                   {student.status !== 'archived' ? <button type="button" onClick={() => archiveStudent(student)}>归档</button> : null}
                 </td>
@@ -563,7 +650,9 @@ export default function StudentsPage() {
             ))}
             {!students.length && !loading ? (
               <tr>
-                <td colSpan="8" className="empty-cell">暂无学生数据</td>
+                <td colSpan="8" className="empty-cell">
+                  {hasSearched ? '暂无符合条件的学生' : '请先搜索，再展示学生列表'}
+                </td>
               </tr>
             ) : null}
           </tbody>

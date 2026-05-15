@@ -58,6 +58,7 @@ export default function HomeworkPage() {
   const [records, setRecords] = useState([]);
   const [selectedAssignmentId, setSelectedAssignmentId] = useState('');
   const [submitStatus, setSubmitStatus] = useState('');
+  const [lateStatus, setLateStatus] = useState('');
   const [keyword, setKeyword] = useState('');
   const [form, setForm] = useState(emptyAssignmentForm);
   const [newClassName, setNewClassName] = useState('');
@@ -65,6 +66,7 @@ export default function HomeworkPage() {
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [creating, setCreating] = useState(false);
   const [creatingClass, setCreatingClass] = useState(false);
+  const [syncingRecords, setSyncingRecords] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
@@ -74,8 +76,9 @@ export default function HomeworkPage() {
   const recordFilters = useMemo(() => ({
     assignmentId: selectedAssignmentId,
     submitStatus,
+    lateStatus,
     keyword
-  }), [selectedAssignmentId, submitStatus, keyword]);
+  }), [selectedAssignmentId, submitStatus, lateStatus, keyword]);
   const exportCsvUrl = buildPath('/api/export/homework', recordFilters);
   const exportZipUrl = selectedAssignment ? `/api/export/homework/${selectedAssignment.id}.zip` : '';
   const classOptions = useMemo(() => {
@@ -195,6 +198,40 @@ export default function HomeworkPage() {
     }
   }
 
+  async function handleSyncRecords() {
+    if (!selectedAssignment) return;
+    setSyncingRecords(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await apiPost(`/api/homework-assignments/${selectedAssignment.id}/sync-records`, {});
+      setMessage(result.createdCount ? `已补发 ${result.createdCount} 条待提交记录` : '名单已是最新，无需补发');
+      await loadAssignments(selectedAssignment.id);
+      await loadRecords();
+    } catch (err) {
+      setError(err.message || '同步待提交名单失败');
+    } finally {
+      setSyncingRecords(false);
+    }
+  }
+
+  async function handleCopyMissingStudents() {
+    const missing = records.filter((record) => !['submitted', 'reviewed'].includes(record.submitStatus));
+    if (!missing.length) {
+      setMessage('当前筛选下没有缺交学生');
+      return;
+    }
+    const text = missing
+      .map((record) => `${record.studentName || `#${record.studentId}`}${record.studentPhone ? `（${record.studentPhone}）` : ''}`)
+      .join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessage(`已复制 ${missing.length} 名缺交学生`);
+    } catch {
+      setError('复制失败，请手动选中缺交名单复制');
+    }
+  }
+
   return (
     <section className="admin-page homework-page">
       <div className="page-header">
@@ -285,6 +322,10 @@ export default function HomeworkPage() {
                   已交 {assignment.submittedCount}/{assignment.totalCount}
                   <b>{percent(assignment.submittedCount, assignment.totalCount)}</b>
                 </small>
+                <small>
+                  逾期未交 {assignment.overduePendingCount || 0}
+                  <b>迟交 {assignment.lateSubmittedCount || 0}</b>
+                </small>
               </button>
             ))}
           </div>
@@ -296,10 +337,20 @@ export default function HomeworkPage() {
               <h2>{selectedAssignment?.homeworkName || '提交明细'}</h2>
               <p className="muted">
                 {selectedAssignment
-                  ? `${selectedAssignment.className}：已交 ${selectedAssignment.submittedCount} 人，未交 ${selectedAssignment.pendingCount} 人`
+                  ? `${selectedAssignment.className}：已交 ${selectedAssignment.submittedCount} 人，未交 ${selectedAssignment.pendingCount} 人，逾期未交 ${selectedAssignment.overduePendingCount || 0} 人`
                   : '选择一个作业任务后查看学生提交情况。'}
               </p>
             </div>
+            {selectedAssignment ? (
+              <div className="form-actions">
+                <button className="button button-secondary" type="button" onClick={handleSyncRecords} disabled={syncingRecords}>
+                  {syncingRecords ? '正在同步...' : '同步待提交名单'}
+                </button>
+                <button className="button button-secondary" type="button" onClick={handleCopyMissingStudents}>
+                  复制缺交名单
+                </button>
+              </div>
+            ) : null}
           </div>
 
           <div className="toolbar">
@@ -308,6 +359,11 @@ export default function HomeworkPage() {
               <option value="">全部提交状态</option>
               <option value="pending">待提交</option>
               <option value="submitted">已提交</option>
+            </select>
+            <select value={lateStatus} onChange={(event) => setLateStatus(event.target.value)}>
+              <option value="">全部逾期状态</option>
+              <option value="overduePending">只看逾期未交</option>
+              <option value="lateSubmitted">只看迟交</option>
             </select>
           </div>
 
@@ -319,6 +375,7 @@ export default function HomeworkPage() {
                   <th>学生</th>
                   <th>手机号</th>
                   <th>状态</th>
+                  <th>逾期</th>
                   <th>提交时间</th>
                   <th>文件</th>
                   <th>备注</th>
@@ -335,6 +392,7 @@ export default function HomeworkPage() {
                         {homeworkStatusText(record.submitStatus)}
                       </StatusBadge>
                     </td>
+                    <td>{record.lateStatus ? <StatusBadge status={record.lateStatus}>{record.lateStatusText}</StatusBadge> : '-'}</td>
                     <td>{formatDateTime(record.submitAt)}</td>
                     <td>
                       {record.fileName ? (
@@ -347,13 +405,13 @@ export default function HomeworkPage() {
                     <td>{record.remark || '-'}</td>
                     <td className="table-actions">
                       {record.fileName ? <a href={`/api/homework/${record.id}/file`}>下载</a> : <span className="muted">未提交</span>}
-                      <a href={`/api/export/homework/student/${record.studentId}.zip`}>导出该生</a>
+                      <a href={buildPath(`/api/export/homework/student/${record.studentId}.zip`, { assignmentId: selectedAssignmentId })}>导出该生</a>
                     </td>
                   </tr>
                 ))}
                 {!records.length && !loadingRecords ? (
                   <tr>
-                    <td colSpan="7" className="empty-cell">暂无提交记录</td>
+                    <td colSpan="8" className="empty-cell">暂无提交记录</td>
                   </tr>
                 ) : null}
               </tbody>

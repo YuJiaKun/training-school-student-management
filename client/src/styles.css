@@ -639,6 +639,70 @@ textarea:focus {
   overflow-wrap: anywhere;
 }
 
+.account-list {
+  display: grid;
+  gap: 12px;
+}
+
+.account-row {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1.2fr auto auto;
+  gap: 12px;
+  align-items: end;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+}
+
+.account-row-main {
+  display: grid;
+  gap: 4px;
+}
+
+.account-row-main span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.danger-button {
+  border-color: #fecaca;
+  background: #fff7f7;
+  color: var(--danger);
+}
+
+.toggle-card {
+  min-width: 260px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px 14px;
+  font-weight: 800;
+}
+
+.toggle-card input {
+  width: 44px;
+  min-height: 24px;
+  accent-color: var(--primary);
+}
+
+.advanced-import summary {
+  cursor: pointer;
+  color: var(--primary-dark);
+  font-weight: 800;
+  margin-bottom: 10px;
+}
+
+.history-panel,
+.compact-list {
+  display: grid;
+  gap: 12px;
+}
+
 .toolbar {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -770,8 +834,133 @@ tr:last-child td {
   color: var(--muted);
 }
 
+.inline-link {
+  display: inline-flex;
+  margin-left: 10px;
+  color: var(--primary-dark);
+  font-weight: 800;
+}
+
 .record-main {
   min-width: 0;
+}
+
+.record-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.link-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.schedule-guard-panel {
+  border-color: rgba(245, 158, 11, 0.42);
+  background: linear-gradient(180deg, #fffbeb, #fff);
+}
+
+.schedule-request-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px 14px;
+}
+
+.schedule-request-status span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.schedule-request-status strong {
+  color: var(--primary-dark);
+}
+
+.schedule-week-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.weekly-schedule-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(130px, 1fr));
+  gap: 10px;
+  margin: 12px 0 16px;
+  overflow-x: auto;
+}
+
+.weekly-schedule-day {
+  min-width: 130px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px;
+}
+
+.weekly-schedule-date {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 900;
+  margin-bottom: 8px;
+}
+
+.weekly-schedule-entry {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 9px;
+}
+
+.weekly-schedule-entry + .weekly-schedule-entry {
+  margin-top: 8px;
+}
+
+.weekly-schedule-entry.is-own {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.weekly-schedule-entry div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.weekly-schedule-entry strong,
+.weekly-schedule-entry p {
+  margin: 0;
+}
+
+.transcript-upload-form {
+  width: min(340px, 100%);
+  display: grid;
+  gap: 8px;
+  flex: 0 0 320px;
 }
 
 .cell-subtext {
@@ -1542,7 +1731,8 @@ tr:last-child td {
 
   .form-grid,
   .schedule-form,
-  .account-chip-list {
+  .account-chip-list,
+  .account-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -1622,6 +1812,12 @@ tr:last-child td {
   .inline-create {
     grid-template-columns: 1fr;
   }
+
+  .account-row,
+  .toggle-card {
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
 }
 
 @media (max-width: 620px) {
@@ -1645,6 +1841,7 @@ tr:last-child td {
   .form-grid,
   .schedule-form,
   .account-chip-list,
+  .account-row,
   .metric-row,
   .demo-accounts {
     grid-template-columns: 1fr;

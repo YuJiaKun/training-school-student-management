@@ -91,7 +91,13 @@ function createServerApp({
           }
 
           if (req.method === 'GET' && url.pathname === '/api/teachers') {
-            sendJson(res, 200, app.listTeachers());
+            sendJson(res, 200, app.listTeachers(session.role === 'student' ? { forStudent: true } : {}));
+            return;
+          }
+
+          if (req.method === 'PATCH' && url.pathname === '/api/teacher-workspace/scheduling') {
+            if (!authorize(res, session, ['teacher'])) return;
+            await mutateJson(req, res, 200, (body) => ({ teacher: app.updateTeacherScheduling(session, body) }), app, bodyOptions);
             return;
           }
 
@@ -120,6 +126,18 @@ function createServerApp({
           if (req.method === 'PATCH' && url.pathname === '/api/student-workspace/profile') {
             if (!authorize(res, session, ['student'])) return;
             await mutateJson(req, res, 200, (body) => ({ student: app.updateStudentProfile(session, body) }), app, bodyOptions);
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/student-workspace/schedules/week') {
+            if (!authorize(res, session, ['student'])) return;
+            try {
+              sendJson(res, 200, app.listStudentWeeklySchedules(session, {
+                weekStart: url.searchParams.get('weekStart') || currentWeekStart()
+              }));
+            } catch (error) {
+              sendJson(res, error.statusCode || 400, { error: error.message });
+            }
             return;
           }
 
@@ -176,6 +194,33 @@ function createServerApp({
             return;
           }
 
+          if (req.method === 'GET' && url.pathname === '/api/admin/teacher-accounts') {
+            if (!authorize(res, session, ['admin'])) return;
+            sendJson(res, 200, app.listTeacherAccounts());
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/admin/teacher-accounts') {
+            if (!authorize(res, session, ['admin'])) return;
+            await mutateJson(req, res, 201, (body) => ({ account: app.createTeacherAccount(body) }), app, bodyOptions);
+            return;
+          }
+
+          const teacherAccountMatch = url.pathname.match(/^\/api\/admin\/teacher-accounts\/(.+)$/);
+          if (teacherAccountMatch && req.method === 'PATCH') {
+            if (!authorize(res, session, ['admin'])) return;
+            const accountKey = decodeURIComponent(teacherAccountMatch[1]);
+            await mutateJson(req, res, 200, (body) => ({ account: app.updateTeacherAccount(accountKey, body) }), app, bodyOptions);
+            return;
+          }
+
+          if (teacherAccountMatch && req.method === 'DELETE') {
+            if (!authorize(res, session, ['admin'])) return;
+            const accountKey = decodeURIComponent(teacherAccountMatch[1]);
+            mutate(res, 200, () => ({ account: app.disableTeacherAccount(accountKey) }), app);
+            return;
+          }
+
           if (req.method === 'POST' && url.pathname === '/api/students') {
             if (!authorize(res, session, ['admin'])) return;
             await mutateJson(req, res, 201, (body) => ({ student: app.createStudent(body) }), app, bodyOptions);
@@ -189,6 +234,13 @@ function createServerApp({
             return;
           }
 
+          const studentAccountMatch = url.pathname.match(/^\/api\/students\/(\d+)\/account$/);
+          if (studentAccountMatch && req.method === 'DELETE') {
+            if (!authorize(res, session, ['admin'])) return;
+            mutate(res, 200, () => ({ account: app.disableStudentAccount(Number(studentAccountMatch[1])) }), app);
+            return;
+          }
+
           const archiveMatch = url.pathname.match(/^\/api\/students\/(\d+)\/archive$/);
           if (archiveMatch && req.method === 'POST') {
             if (!authorize(res, session, ['admin'])) return;
@@ -198,7 +250,12 @@ function createServerApp({
 
           if (req.method === 'GET' && url.pathname === '/api/homework-assignments') {
             if (!authorize(res, session, ['admin', 'teacher'])) return;
-            sendJson(res, 200, app.listHomeworkAssignments(readHomeworkAssignmentFilters(url)));
+            const filters = readScopedHomeworkAssignmentFilters(url, session);
+            if (!filters) {
+              sendJson(res, 403, { error: 'forbidden' });
+              return;
+            }
+            sendJson(res, 200, app.listHomeworkAssignments(filters));
             return;
           }
 
@@ -208,9 +265,21 @@ function createServerApp({
             return;
           }
 
+          const homeworkSyncMatch = url.pathname.match(/^\/api\/homework-assignments\/(\d+)\/sync-records$/);
+          if (homeworkSyncMatch && req.method === 'POST') {
+            if (!authorize(res, session, ['teacher'])) return;
+            mutate(res, 200, () => app.syncHomeworkAssignmentRecords(Number(homeworkSyncMatch[1]), session), app);
+            return;
+          }
+
           if (req.method === 'GET' && url.pathname === '/api/homework') {
             if (!authorize(res, session, ['admin', 'teacher'])) return;
-            sendJson(res, 200, app.listHomeworkRecords(readHomeworkFilters(url)));
+            const filters = readScopedHomeworkFilters(url, session);
+            if (!filters) {
+              sendJson(res, 403, { error: 'forbidden' });
+              return;
+            }
+            sendJson(res, 200, app.listHomeworkRecords(filters));
             return;
           }
 
@@ -293,8 +362,10 @@ function createServerApp({
 
           const scheduleApproveMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/approve$/);
           if (scheduleApproveMatch && req.method === 'POST') {
-            if (!authorize(res, session, ['admin'])) return;
-            await mutateJson(req, res, 200, (body) => ({ schedule: app.approveInterviewSchedule(Number(scheduleApproveMatch[1]), body) }), app, bodyOptions);
+            if (!authorizeScheduleAction(res, session, app, Number(scheduleApproveMatch[1]), ['admin', 'teacher'])) return;
+            await mutateJson(req, res, 200, (body) => ({
+              schedule: app.approveInterviewSchedule(Number(scheduleApproveMatch[1]), body, session.role === 'teacher' ? 'teacher' : 'admin')
+            }), app, bodyOptions);
             return;
           }
 
@@ -326,6 +397,24 @@ function createServerApp({
             return;
           }
 
+          const scheduleTranscriptMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/transcript$/);
+          if (scheduleTranscriptMatch && req.method === 'POST') {
+            if (!authorize(res, session, ['student'])) return;
+            await handleInterviewTranscriptSubmission(req, res, app, Number(scheduleTranscriptMatch[1]), session, uploadBodyOptions);
+            return;
+          }
+
+          if (scheduleTranscriptMatch && req.method === 'GET') {
+            if (!authorize(res, session, ['admin', 'teacher', 'student'])) return;
+            try {
+              const file = app.getInterviewTranscriptFile(Number(scheduleTranscriptMatch[1]), session);
+              sendDownload(res, 200, file.body, file.contentType, file.fileName);
+            } catch (error) {
+              sendJson(res, error.statusCode || 400, { error: error.message });
+            }
+            return;
+          }
+
           const scheduleMatch = url.pathname.match(/^\/api\/schedules\/(\d+)$/);
           if (scheduleMatch && req.method === 'PATCH') {
             if (!authorize(res, session, ['admin'])) return;
@@ -349,7 +438,12 @@ function createServerApp({
           if (homeworkStudentZipMatch && req.method === 'GET') {
             if (!authorize(res, session, ['admin', 'teacher'])) return;
             try {
-              const zip = app.exportHomeworkStudentZip(Number(homeworkStudentZipMatch[1]), readHomeworkFilters(url));
+              const filters = readScopedHomeworkFilters(url, session);
+              if (!filters) {
+                sendJson(res, 403, { error: 'forbidden' });
+                return;
+              }
+              const zip = app.exportHomeworkStudentZip(Number(homeworkStudentZipMatch[1]), filters, session);
               sendDownload(res, 200, zip.body, zip.contentType, zip.fileName);
             } catch (error) {
               sendJson(res, error.statusCode || 400, { error: error.message });
@@ -361,7 +455,7 @@ function createServerApp({
           if (homeworkZipMatch && req.method === 'GET') {
             if (!authorize(res, session, ['admin', 'teacher'])) return;
             try {
-              const zip = app.exportHomeworkAssignmentZip(Number(homeworkZipMatch[1]));
+              const zip = app.exportHomeworkAssignmentZip(Number(homeworkZipMatch[1]), session);
               sendDownload(res, 200, zip.body, zip.contentType, zip.fileName);
             } catch (error) {
               sendJson(res, error.statusCode || 400, { error: error.message });
@@ -371,7 +465,12 @@ function createServerApp({
 
           if (req.method === 'GET' && url.pathname === '/api/export/homework') {
             if (!authorize(res, session, ['admin', 'teacher'])) return;
-            sendText(res, 200, app.exportHomeworkRecords(readHomeworkFilters(url)), 'text/csv; charset=utf-8');
+            const filters = readScopedHomeworkFilters(url, session);
+            if (!filters) {
+              sendJson(res, 403, { error: 'forbidden' });
+              return;
+            }
+            sendText(res, 200, app.exportHomeworkRecords(filters), 'text/csv; charset=utf-8');
             return;
           }
 
@@ -469,13 +568,30 @@ async function handleHomeworkSubmission(req, res, app, recordId, session, bodyOp
   }
 }
 
+async function handleInterviewTranscriptSubmission(req, res, app, scheduleId, session, bodyOptions) {
+  try {
+    const form = await readMultipartForm(req, bodyOptions);
+    if (!form.file) throw new Error('interview transcript file is required');
+    const schedule = app.submitInterviewTranscriptFile(scheduleId, {
+      studentId: session.studentId,
+      fileName: form.file.fileName,
+      contentType: form.file.contentType,
+      content: form.file.content
+    });
+    persist(app);
+    sendJson(res, 200, { schedule });
+  } catch (error) {
+    sendJson(res, error.statusCode || 400, { error: error.message });
+  }
+}
+
 function mutate(res, statusCode, handler, app) {
   try {
     const payload = handler();
     persist(app);
     sendJson(res, statusCode, payload);
   } catch (error) {
-    sendJson(res, 400, { error: error.message });
+    sendJson(res, error.statusCode || 400, { error: error.message });
   }
 }
 
@@ -582,6 +698,11 @@ function readHomeworkAssignmentFilters(url) {
   };
 }
 
+function readScopedHomeworkAssignmentFilters(url, session) {
+  const filters = readHomeworkAssignmentFilters(url);
+  return applyTeacherClassScope(filters, session);
+}
+
 function readTeacherHomeworkAnalyticsFilters(url, session) {
   const requestedClassName = url.searchParams.get('className') || '';
   const classNames = Array.isArray(session.classNames) ? session.classNames : [];
@@ -599,8 +720,21 @@ function readHomeworkFilters(url) {
     assignmentId: url.searchParams.get('assignmentId') || undefined,
     className: url.searchParams.get('className') || undefined,
     submitStatus: url.searchParams.get('submitStatus') || undefined,
+    lateStatus: url.searchParams.get('lateStatus') || undefined,
     keyword: url.searchParams.get('keyword') || undefined
   };
+}
+
+function readScopedHomeworkFilters(url, session) {
+  const filters = readHomeworkFilters(url);
+  return applyTeacherClassScope(filters, session);
+}
+
+function applyTeacherClassScope(filters, session) {
+  if (session.role !== 'teacher') return filters;
+  const classNames = Array.isArray(session.classNames) ? session.classNames : [];
+  if (filters.className && !classNames.includes(filters.className)) return null;
+  return { ...filters, classNames };
 }
 
 function readInterviewFilters(url) {
@@ -617,7 +751,8 @@ function readScheduleFilters(url) {
     studentId: url.searchParams.get('studentId') || undefined,
     status: url.searchParams.get('status') || undefined,
     from: url.searchParams.get('from') || undefined,
-    to: url.searchParams.get('to') || undefined
+    to: url.searchParams.get('to') || undefined,
+    keyword: url.searchParams.get('keyword') || undefined
   };
 }
 
@@ -694,6 +829,8 @@ function sessionToUser(session) {
     role: session.role,
     teacherId: session.teacherId || null,
     studentId: session.studentId || null,
+    teacherName: session.teacherName || '',
+    participatesInScheduling: session.participatesInScheduling === true,
     classNames: Array.isArray(session.classNames) ? session.classNames : []
   };
 }

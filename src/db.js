@@ -96,7 +96,7 @@ function normalizeState(raw) {
   const homeworkAssignments = normalizeHomeworkAssignments(raw.homeworkAssignments || []);
   const homeworkRecords = normalizeHomeworkRecords(raw.homeworkRecords || []);
   const interviewRecords = normalizeRecords(raw.interviewRecords || [], 'studentId');
-  const interviewSchedules = normalizeRecords(raw.interviewSchedules || [], 'studentId');
+  const interviewSchedules = normalizeInterviewSchedules(raw.interviewSchedules || []);
   const authAccounts = normalizeAuthAccounts(raw.authAccounts || []);
   const classes = normalizeClasses(raw.classes || [], {
     students,
@@ -168,6 +168,17 @@ function normalizeRecords(records, numericKey) {
     id: Number(record.id),
     [numericKey]: Number(record[numericKey])
   })).filter((record) => Number.isInteger(record.id) && record.id > 0);
+}
+
+function normalizeInterviewSchedules(records) {
+  return normalizeRecords(records, 'studentId').map((record) => ({
+    ...record,
+    teacherId: record.teacherId ? Number(record.teacherId) : null,
+    transcriptFileName: record.transcriptFileName || '',
+    transcriptFilePath: record.transcriptFilePath || '',
+    transcriptFileSize: record.transcriptFileSize ? Number(record.transcriptFileSize) : 0,
+    transcriptUploadedAt: record.transcriptUploadedAt || ''
+  }));
 }
 
 function normalizeAuthAccounts(accounts) {

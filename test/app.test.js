@@ -293,7 +293,7 @@ test('student homework upload endpoint only accepts own txt submission and expos
     uploadRoot,
     authAccounts: [
       { username: 'admin', password: 'admin123', role: 'admin' },
-      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1 },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, classNames: ['前端1班'] },
       { username: 'student-a', password: 'student123', role: 'student', studentId: 1 },
       { username: 'student-b', password: 'student123', role: 'student', studentId: 2 }
     ]
@@ -411,6 +411,167 @@ test('homework student zip export includes only one student files and summary', 
   assert.doesNotMatch(aliceZipText, /Bob answer/);
   assert.match(charlieZipText, /提交清单\.csv/);
   assert.doesNotMatch(charlieZipText, /alice\.txt|bob\.txt/);
+});
+
+test('teacher homework APIs are scoped to responsible classes and can sync missing records', async () => {
+  const uploadRoot = createUploadRoot();
+  const app = createApp({
+    db: createDatabase(),
+    uploadRoot,
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'front-teacher', password: 'teacher123', role: 'teacher', teacherId: 1, classNames: ['Frontend1'] },
+      { username: 'java-teacher', password: 'teacher123', role: 'teacher', teacherId: 2, classNames: ['Java1'] },
+      { username: 'student-a', password: 'student123', role: 'student', studentId: 1 },
+      { username: 'student-c', password: 'student123', role: 'student', studentId: 3 }
+    ]
+  });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend1' });
+  const charlie = app.createStudent({ name: 'Charlie', phone: '13800000003', className: 'Java1' });
+
+  await withServer(app, async (baseUrl) => {
+    const frontCookie = await loginAs(baseUrl, 'front-teacher', 'teacher123');
+    const javaCookie = await loginAs(baseUrl, 'java-teacher', 'teacher123');
+    const studentCookie = await loginAs(baseUrl, 'student-c', 'student123');
+
+    const frontAssignment = await fetch(`${baseUrl}/api/homework-assignments`, {
+      method: 'POST',
+      headers: jsonHeaders(frontCookie),
+      body: JSON.stringify({ homeworkName: 'Frontend Week 1', className: 'Frontend1', dueDate: '2026-05-20' })
+    }).then((response) => response.json());
+    const forbiddenCreate = await fetch(`${baseUrl}/api/homework-assignments`, {
+      method: 'POST',
+      headers: jsonHeaders(frontCookie),
+      body: JSON.stringify({ homeworkName: 'Java Week 1', className: 'Java1' })
+    });
+    const javaAssignment = await fetch(`${baseUrl}/api/homework-assignments`, {
+      method: 'POST',
+      headers: jsonHeaders(javaCookie),
+      body: JSON.stringify({ homeworkName: 'Java Week 1', className: 'Java1' })
+    }).then((response) => response.json());
+
+    const javaRecord = javaAssignment.records.find((record) => record.studentId === charlie.id);
+    const javaForm = new FormData();
+    javaForm.append('file', new Blob(['Java answer'], { type: 'text/plain' }), 'java.txt');
+    await fetch(`${baseUrl}/api/homework/${javaRecord.id}/submission`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: javaForm
+    });
+
+    app.createStudent({ name: 'Bob', phone: '13800000002', className: 'Frontend1' });
+    const sync = await fetch(`${baseUrl}/api/homework-assignments/${frontAssignment.assignment.id}/sync-records`, {
+      method: 'POST',
+      headers: { cookie: frontCookie }
+    }).then((response) => response.json());
+    const secondSync = await fetch(`${baseUrl}/api/homework-assignments/${frontAssignment.assignment.id}/sync-records`, {
+      method: 'POST',
+      headers: { cookie: frontCookie }
+    }).then((response) => response.json());
+    const forbiddenSync = await fetch(`${baseUrl}/api/homework-assignments/${javaAssignment.assignment.id}/sync-records`, {
+      method: 'POST',
+      headers: { cookie: frontCookie }
+    });
+
+    const assignments = await fetch(`${baseUrl}/api/homework-assignments`, { headers: { cookie: frontCookie } }).then((response) => response.json());
+    const records = await fetch(`${baseUrl}/api/homework`, { headers: { cookie: frontCookie } }).then((response) => response.json());
+    const csv = await fetch(`${baseUrl}/api/export/homework`, { headers: { cookie: frontCookie } }).then((response) => response.text());
+    const forbiddenZip = await fetch(`${baseUrl}/api/export/homework/${javaAssignment.assignment.id}.zip`, { headers: { cookie: frontCookie } });
+    const forbiddenFile = await fetch(`${baseUrl}/api/homework/${javaRecord.id}/file`, { headers: { cookie: frontCookie } });
+    const forbiddenStudentZip = await fetch(`${baseUrl}/api/export/homework/student/${charlie.id}.zip`, { headers: { cookie: frontCookie } });
+
+    assert.equal(forbiddenCreate.status, 403);
+    assert.equal(sync.createdCount, 1);
+    assert.equal(sync.records[0].studentName, 'Bob');
+    assert.equal(secondSync.createdCount, 0);
+    assert.equal(forbiddenSync.status, 403);
+    assert.deepEqual(assignments.items.map((assignment) => assignment.className), ['Frontend1']);
+    assert.equal(records.items.every((record) => record.className === 'Frontend1'), true);
+    assert.match(csv, /Frontend Week 1/);
+    assert.doesNotMatch(csv, /Java Week 1/);
+    assert.equal(forbiddenZip.status, 403);
+    assert.equal(forbiddenFile.status, 403);
+    assert.equal(forbiddenStudentZip.status, 403);
+    assert.equal(frontAssignment.records[0].studentId, alice.id);
+  });
+});
+
+test('homework late status is calculated for assignment stats records and exports', () => {
+  const app = createApp({ db: createDatabase() });
+  assert.throws(() => {
+    app.createHomeworkAssignment({ homeworkName: 'Missing Class Homework', className: 'MissingClass' });
+  }, /class not found/);
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend1' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: 'Frontend1' });
+  const created = app.createHomeworkAssignment({
+    homeworkName: 'Late Homework',
+    className: 'Frontend1',
+    dueDate: '2026-05-01'
+  });
+  const aliceRecord = created.records.find((record) => record.studentId === alice.id);
+  const bobRecord = created.records.find((record) => record.studentId === bob.id);
+
+  app.updateHomeworkRecord(aliceRecord.id, { submitStatus: 'submitted', submitAt: '2026-05-02T09:00:00', fileName: 'late.txt' });
+  app.updateHomeworkRecord(bobRecord.id, { submitStatus: 'pending' });
+
+  const assignments = app.listHomeworkAssignments({ now: '2026-05-03T00:00:00' }).items;
+  const overdueRecords = app.listHomeworkRecords({ lateStatus: 'overduePending', now: '2026-05-03T00:00:00' }).items;
+  const lateRecords = app.listHomeworkRecords({ lateStatus: 'lateSubmitted', now: '2026-05-03T00:00:00' }).items;
+  const csv = app.exportHomeworkRecords({ now: '2026-05-03T00:00:00' });
+
+  assert.equal(assignments[0].overduePendingCount, 1);
+  assert.equal(assignments[0].lateSubmittedCount, 1);
+  assert.equal(overdueRecords.length, 1);
+  assert.equal(overdueRecords[0].studentName, 'Bob');
+  assert.equal(overdueRecords[0].lateStatus, 'overduePending');
+  assert.equal(lateRecords.length, 1);
+  assert.equal(lateRecords[0].studentName, 'Alice');
+  assert.equal(lateRecords[0].lateStatus, 'lateSubmitted');
+  assert.match(csv, /逾期状态/);
+  assert.match(csv, /逾期未交/);
+  assert.match(csv, /迟交/);
+});
+
+test('student repeated homework uploads keep latest file and remove previous stored file', async () => {
+  const uploadRoot = createUploadRoot();
+  const app = createApp({
+    db: createDatabase(),
+    uploadRoot,
+    authAccounts: [
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, classNames: ['Frontend1'] },
+      { username: 'student-a', password: 'student123', role: 'student', studentId: 1 }
+    ]
+  });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend1' });
+  const created = app.createHomeworkAssignment({ homeworkName: 'Repeat Upload', className: 'Frontend1' });
+  const record = created.records.find((item) => item.studentId === alice.id);
+
+  await withServer(app, async (baseUrl) => {
+    const studentCookie = await loginAs(baseUrl, 'student-a', 'student123');
+
+    const firstForm = new FormData();
+    firstForm.append('file', new Blob(['first answer'], { type: 'text/plain' }), 'first.txt');
+    const first = await fetch(`${baseUrl}/api/homework/${record.id}/submission`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: firstForm
+    }).then((response) => response.json());
+
+    const secondForm = new FormData();
+    secondForm.append('file', new Blob(['second answer'], { type: 'text/plain' }), 'second.txt');
+    const second = await fetch(`${baseUrl}/api/homework/${record.id}/submission`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: secondForm
+    }).then((response) => response.json());
+    const downloaded = await fetch(`${baseUrl}/api/homework/${record.id}/file`, { headers: { cookie: studentCookie } }).then((response) => response.text());
+
+    assert.equal(first.record.fileName, 'first.txt');
+    assert.equal(second.record.fileName, 'second.txt');
+    assert.equal(downloaded, 'second answer');
+    assert.equal(fs.existsSync(first.record.filePath), false);
+    assert.equal(fs.existsSync(second.record.filePath), true);
+  });
 });
 
 test('homework analytics summarizes overview classes assignments and students', async () => {
@@ -991,6 +1152,235 @@ test('cancelled schedules do not block the same time slot', () => {
   assert.equal(second.teacherId, 1);
 });
 
+test('student weekly schedule view hides other student names', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, teacherName: 'Teacher A', participatesInScheduling: true },
+      { username: 'student-a', password: 'student123', role: 'student', studentId: 1 },
+      { username: 'student-b', password: 'student123', role: 'student', studentId: 2 }
+    ],
+    teachers: [{ id: 1, name: 'Teacher A' }]
+  });
+  const alice = app.createStudent({ name: 'Alice', className: 'Frontend' });
+  const bob = app.createStudent({ name: 'Bob', className: 'Frontend' });
+  app.createInterviewSchedule({
+    studentId: alice.id,
+    teacherId: 1,
+    teacherName: 'Teacher A',
+    companyName: 'Alice Co',
+    positionName: 'Frontend Engineer',
+    startsAt: '2026-05-18T09:00:00',
+    endsAt: '2026-05-18T09:30:00',
+    status: 'confirmed'
+  });
+  app.createInterviewSchedule({
+    studentId: bob.id,
+    teacherId: 1,
+    teacherName: 'Teacher A',
+    companyName: 'Bob Co',
+    positionName: 'Backend Engineer',
+    startsAt: '2026-05-19T10:00:00',
+    endsAt: '2026-05-19T10:30:00',
+    status: 'confirmed'
+  });
+
+  await withServer(app, async (baseUrl) => {
+    const studentCookie = await loginAs(baseUrl, 'student-a', 'student123');
+    const weekly = await fetch(`${baseUrl}/api/student-workspace/schedules/week?weekStart=2026-05-18`, {
+      headers: { cookie: studentCookie }
+    }).then((response) => response.json());
+
+    const own = weekly.entries.find((entry) => entry.companyName === 'Alice Co');
+    const other = weekly.entries.find((entry) => entry.companyName === 'Bob Co');
+
+    assert.equal(weekly.weeks.length, 7);
+    assert.equal(weekly.entries.length, 2);
+    assert.equal(own.isOwn, true);
+    assert.equal(own.studentName, 'Alice');
+    assert.equal(own.studentId, alice.id);
+    assert.equal(other.isOwn, false);
+    assert.equal(other.studentName, '');
+    assert.equal(other.studentId, undefined);
+  });
+});
+
+test('student schedule requests are blocked by unfinished limit and missing transcripts', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, teacherName: 'Teacher A', participatesInScheduling: true },
+      { username: 'student', password: 'student123', role: 'student', studentId: 1 }
+    ],
+    teachers: [{ id: 1, name: 'Teacher A' }]
+  });
+  const alice = app.createStudent({ name: 'Alice', className: 'Frontend' });
+  for (let index = 0; index < 3; index += 1) {
+    app.createInterviewSchedule({
+      studentId: alice.id,
+      teacherId: 1,
+      teacherName: 'Teacher A',
+      companyName: `Pending ${index}`,
+      positionName: 'Frontend Engineer',
+      startsAt: `2026-05-18T1${index}:00:00`,
+      endsAt: `2026-05-18T1${index}:30:00`,
+      status: 'requested'
+    });
+  }
+
+  await withServer(app, async (baseUrl) => {
+    const studentCookie = await loginAs(baseUrl, 'student', 'student123');
+    const workspace = await fetch(`${baseUrl}/api/student-workspace`, {
+      headers: { cookie: studentCookie }
+    }).then((response) => response.json());
+    const limited = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(studentCookie),
+      body: JSON.stringify({
+        studentId: alice.id,
+        teacherId: 1,
+        teacherName: 'Teacher A',
+        startsAt: '2026-05-20T09:00:00',
+        endsAt: '2026-05-20T09:30:00'
+      })
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+
+    assert.equal(workspace.scheduleGuard.canRequest, false);
+    assert.equal(workspace.scheduleGuard.unfinishedCount, 3);
+    assert.equal(workspace.scheduleGuard.reason, 'unfinished schedule limit reached');
+    assert.equal(limited.status, 400);
+    assert.equal(limited.body.error, 'unfinished schedule limit reached');
+  });
+
+  for (const schedule of app.listInterviewSchedules({ studentId: alice.id }).items) {
+    app.cancelInterviewSchedule(schedule.id);
+  }
+  const completed = app.createInterviewSchedule({
+    studentId: alice.id,
+    teacherId: 1,
+    teacherName: 'Teacher A',
+    companyName: 'Transcript Required Co',
+    positionName: 'Frontend Engineer',
+    startsAt: '2026-05-21T09:00:00',
+    endsAt: '2026-05-21T09:30:00',
+    status: 'confirmed'
+  });
+  app.completeInterviewSchedule(completed.id);
+
+  await withServer(app, async (baseUrl) => {
+    const studentCookie = await loginAs(baseUrl, 'student', 'student123');
+    const workspace = await fetch(`${baseUrl}/api/student-workspace`, {
+      headers: { cookie: studentCookie }
+    }).then((response) => response.json());
+    const blocked = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(studentCookie),
+      body: JSON.stringify({
+        studentId: alice.id,
+        teacherId: 1,
+        teacherName: 'Teacher A',
+        startsAt: '2026-05-22T09:00:00',
+        endsAt: '2026-05-22T09:30:00'
+      })
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+
+    assert.equal(workspace.scheduleGuard.canRequest, false);
+    assert.equal(workspace.scheduleGuard.pendingTranscriptSchedules.length, 1);
+    assert.equal(workspace.scheduleGuard.reason, 'interview transcript required');
+    assert.equal(blocked.status, 400);
+    assert.equal(blocked.body.error, 'interview transcript required');
+  });
+});
+
+test('students upload txt transcripts for completed schedules and authorized users can download them', async () => {
+  const uploadRoot = createUploadRoot();
+  const app = createApp({
+    db: createDatabase(),
+    uploadRoot,
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, teacherName: 'Teacher A', participatesInScheduling: true },
+      { username: 'student-a', password: 'student123', role: 'student', studentId: 1 },
+      { username: 'student-b', password: 'student123', role: 'student', studentId: 2 }
+    ],
+    teachers: [{ id: 1, name: 'Teacher A' }]
+  });
+  const alice = app.createStudent({ name: 'Alice', className: 'Frontend' });
+  const bob = app.createStudent({ name: 'Bob', className: 'Frontend' });
+  const completed = app.createInterviewSchedule({
+    studentId: alice.id,
+    teacherId: 1,
+    teacherName: 'Teacher A',
+    companyName: 'Transcript Co',
+    positionName: 'Frontend Engineer',
+    startsAt: '2026-05-18T09:00:00',
+    endsAt: '2026-05-18T09:30:00',
+    status: 'confirmed'
+  });
+  app.completeInterviewSchedule(completed.id);
+
+  await withServer(app, async (baseUrl) => {
+    const adminCookie = await loginAs(baseUrl);
+    const teacherCookie = await loginAs(baseUrl, 'teacher', 'teacher123');
+    const studentCookie = await loginAs(baseUrl, 'student-a', 'student123');
+    const otherStudentCookie = await loginAs(baseUrl, 'student-b', 'student123');
+
+    const badFile = new FormData();
+    badFile.append('file', new Blob(['bad'], { type: 'application/javascript' }), 'transcript.js');
+    const rejectedType = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: badFile
+    });
+
+    const forbiddenFile = new FormData();
+    forbiddenFile.append('file', new Blob(['Bob tries'], { type: 'text/plain' }), 'bob.txt');
+    const forbiddenUpload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, {
+      method: 'POST',
+      headers: { cookie: otherStudentCookie },
+      body: forbiddenFile
+    });
+
+    const transcript = new FormData();
+    transcript.append('file', new Blob(['Alice transcript'], { type: 'text/plain' }), 'alice-transcript.txt');
+    const uploaded = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: transcript
+    }).then((response) => response.json());
+
+    const teacherDownload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, { headers: { cookie: teacherCookie } });
+    const adminDownload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, { headers: { cookie: adminCookie } });
+    const deniedDownload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, { headers: { cookie: otherStudentCookie } });
+    const nextRequest = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(studentCookie),
+      body: JSON.stringify({
+        studentId: alice.id,
+        teacherId: 1,
+        teacherName: 'Teacher A',
+        startsAt: '2026-05-22T09:00:00',
+        endsAt: '2026-05-22T09:30:00'
+      })
+    });
+
+    assert.equal(rejectedType.status, 400);
+    assert.equal(forbiddenUpload.status, 403);
+    assert.equal(uploaded.schedule.transcriptFileName, 'alice-transcript.txt');
+    assert.equal(uploaded.schedule.transcriptFileSize, 'Alice transcript'.length);
+    assert.ok(uploaded.schedule.transcriptUploadedAt);
+    assert.equal(await teacherDownload.text(), 'Alice transcript');
+    assert.equal(await adminDownload.text(), 'Alice transcript');
+    assert.equal(teacherDownload.headers.get('content-type'), 'text/plain; charset=utf-8');
+    assert.equal(deniedDownload.status, 403);
+    assert.equal(nextRequest.status, 201);
+    assert.equal(fs.readFileSync(uploaded.schedule.transcriptFilePath, 'utf8'), 'Alice transcript');
+    assert.equal(bob.id, 2);
+  });
+});
+
 test('client assets are served and deep links fall back to the React entry', async () => {
   const app = createApp({ db: createDatabase() });
   const clientDistPath = createClientDist();
@@ -1107,7 +1497,9 @@ test('admin schedule creation confirms immediately and teachers are exposed over
 
     assert.equal(created.schedule.status, 'confirmed');
     assert.equal(created.schedule.confirmedByRole, 'admin');
-    assert.deepEqual(teachers.items, [{ id: 1, name: '张老师' }]);
+    assert.equal(teachers.items[0].id, 1);
+    assert.equal(teachers.items[0].name, '张老师');
+    assert.equal(teachers.items[0].participatesInScheduling, false);
   });
 });
 
@@ -1260,8 +1652,8 @@ test('simple paste student import supports two columns and default class without
     assert.equal(preview.invalidCount, 2);
     assert.equal(preview.rows[0].student.name, 'Alice');
     assert.equal(preview.rows[0].student.className, 'Frontend');
-    assert.deepEqual(preview.rows[1].errors, ['鐝骇涓嶅瓨鍦紝璇峰厛鏂板鐝骇']);
-    assert.deepEqual(preview.rows[2].errors, ['濮撳悕涓嶈兘涓虹┖']);
+    assert.deepEqual(preview.rows[1].errors, ['班级不存在，请先新增班级']);
+    assert.deepEqual(preview.rows[2].errors, ['姓名不能为空']);
 
     const commit = await fetch(`${baseUrl}/api/students/import/commit`, {
       method: 'POST',

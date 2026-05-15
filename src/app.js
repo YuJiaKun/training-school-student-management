@@ -16,11 +16,15 @@ const VALID_ROLES = new Set(['admin', 'teacher', 'student']);
 const VALID_STUDENT_STATUSES = new Set(['active', 'archived']);
 const VALID_HOMEWORK_SUBMIT_STATUSES = new Set(['pending', 'submitted', 'reviewed']);
 const ALLOWED_HOMEWORK_FILE_EXTENSIONS = new Set(['.txt']);
+const ALLOWED_TRANSCRIPT_FILE_EXTENSIONS = new Set(['.txt']);
 const DEFAULT_HOMEWORK_MAX_FILE_BYTES = 20 * 1024 * 1024;
+const DEFAULT_TRANSCRIPT_MAX_FILE_BYTES = 20 * 1024 * 1024;
 const VALID_INTERVIEW_RESULTS = new Set(['pending', 'passed', 'failed']);
 const VALID_HIRED_STATUSES = new Set(['pending', 'hired', 'not_hired']);
 const VALID_SCHEDULE_STATUSES = new Set(['requested', 'scheduled', 'confirmed', 'rescheduled', 'completed', 'cancelled']);
 const TERMINAL_SCHEDULE_STATUSES = new Set(['completed', 'cancelled']);
+const UNFINISHED_SCHEDULE_STATUSES = new Set(['requested', 'scheduled', 'confirmed', 'rescheduled']);
+const MAX_UNFINISHED_STUDENT_SCHEDULES = 3;
 const MAX_LOGIN_FAILURES = 5;
 const LOGIN_LOCK_MS = 5 * 60 * 1000;
 
@@ -30,7 +34,8 @@ function createAppWithOptions({
   teachers = DEFAULT_TEACHERS,
   sessionMaxAgeSeconds = DEFAULT_SESSION_MAX_AGE_SECONDS,
   uploadRoot = defaultUploadRoot(db),
-  homeworkMaxFileBytes = DEFAULT_HOMEWORK_MAX_FILE_BYTES
+  homeworkMaxFileBytes = DEFAULT_HOMEWORK_MAX_FILE_BYTES,
+  transcriptMaxFileBytes = DEFAULT_TRANSCRIPT_MAX_FILE_BYTES
 }) {
   const sessions = new Map();
   const loginFailures = new Map();
@@ -50,6 +55,7 @@ function createAppWithOptions({
   const teacherDirectory = normalizeTeachers(teachers);
   const sessionMaxAgeMs = Number(sessionMaxAgeSeconds || DEFAULT_SESSION_MAX_AGE_SECONDS) * 1000;
   const maxHomeworkFileBytes = Number(homeworkMaxFileBytes || DEFAULT_HOMEWORK_MAX_FILE_BYTES);
+  const maxTranscriptFileBytes = Number(transcriptMaxFileBytes || DEFAULT_TRANSCRIPT_MAX_FILE_BYTES);
 
   return {
     createStudent(input) {
@@ -125,7 +131,7 @@ function createAppWithOptions({
     },
 
     previewStudentImport(input = {}) {
-      return previewStudentImport(db, input.text || input.csv || '');
+      return previewStudentImport(db, input);
     },
 
     importStudents(input = {}) {
@@ -211,10 +217,11 @@ function createAppWithOptions({
         }
 
         const initialPassword = generateInitialPassword();
-        account.password = '';
-        account.passwordHash = hashPassword(initialPassword);
-        account.passwordUpdatedAt = new Date().toISOString();
-        accounts.push(publicStudentAccount(db, account, { initialPassword }));
+        const stored = ensureStoredAccount(baseAuthAccounts, db, account);
+        stored.password = '';
+        stored.passwordHash = hashPassword(initialPassword);
+        stored.passwordUpdatedAt = new Date().toISOString();
+        accounts.push(publicStudentAccount(db, stored, { initialPassword }));
       }
 
       return { accounts, skipped, skippedCount: skipped.length };
@@ -248,6 +255,10 @@ function createAppWithOptions({
       if (!homeworkName || !className) {
         throw new Error('homework name and class are required');
       }
+      if (!findClassOption(db, className)) {
+        throw new Error('class not found');
+      }
+      assertHomeworkClassAccess(session, className);
 
       const assignment = {
         id: db.nextHomeworkAssignmentId++,
@@ -278,15 +289,46 @@ function createAppWithOptions({
     },
 
     listHomeworkAssignments(filters = {}) {
+      const classScope = resolveClassScope(filters);
       const items = db.homeworkAssignments
         .filter((assignment) => {
+          if (!inClassScope(assignment.className, classScope)) return false;
           if (filters.className && assignment.className !== filters.className) return false;
           if (filters.keyword && !assignment.homeworkName.includes(filters.keyword)) return false;
           return true;
         })
-        .map((assignment) => withHomeworkAssignmentStats(db, assignment))
+        .map((assignment) => withHomeworkAssignmentStats(db, assignment, filters.now))
         .sort((left, right) => right.id - left.id);
       return { items, total: items.length };
+    },
+
+    syncHomeworkAssignmentRecords(assignmentId, session = {}) {
+      const assignment = db.homeworkAssignments.find((item) => Number(item.id) === Number(assignmentId));
+      if (!assignment) throw new Error('homework assignment not found');
+      assertHomeworkClassAccess(session, assignment.className);
+
+      const existingStudentIds = new Set(db.homeworkRecords
+        .filter((record) => Number(record.assignmentId) === Number(assignment.id))
+        .map((record) => Number(record.studentId)));
+      const records = db.students
+        .filter((student) => student.status === 'active')
+        .filter((student) => student.className === assignment.className)
+        .filter((student) => !existingStudentIds.has(Number(student.id)))
+        .map((student) => this.addHomeworkRecord({
+          assignmentId: assignment.id,
+          studentId: student.id,
+          homeworkName: assignment.homeworkName,
+          className: assignment.className,
+          dueDate: assignment.dueDate,
+          description: assignment.description,
+          submitStatus: 'pending'
+        }));
+
+      return {
+        assignment: withHomeworkAssignmentStats(db, assignment),
+        createdCount: records.length,
+        records: records.map((record) => withHomeworkStudent(db, record))
+      };
     },
 
     addHomeworkRecord(input) {
@@ -337,19 +379,23 @@ function createAppWithOptions({
     },
 
     listHomeworkRecords(filters = {}) {
+      const classScope = resolveClassScope(filters);
+      const now = filters.now || new Date().toISOString();
       const items = db.homeworkRecords.filter((record) => {
         const student = db.students.find((item) => item.id === record.studentId);
+        if (!inClassScope(record.className, classScope)) return false;
         if (filters.studentId && record.studentId !== Number(filters.studentId)) return false;
         if (filters.assignmentId && Number(record.assignmentId) !== Number(filters.assignmentId)) return false;
         if (filters.className && record.className !== filters.className) return false;
         if (filters.submitStatus === 'submitted' && !isHomeworkSubmittedStatus(record.submitStatus)) return false;
         if (filters.submitStatus && filters.submitStatus !== 'submitted' && record.submitStatus !== filters.submitStatus) return false;
+        if (filters.lateStatus && homeworkLateStatus(record, now) !== filters.lateStatus) return false;
         if (filters.keyword) {
           const text = `${record.homeworkName} ${record.className} ${student?.name || ''} ${student?.phone || ''}`;
           if (!text.includes(filters.keyword)) return false;
         }
         return true;
-      }).map((record) => withHomeworkStudent(db, record));
+      }).map((record) => withHomeworkStudent(db, record, now));
       return { items, total: items.length };
     },
 
@@ -367,10 +413,10 @@ function createAppWithOptions({
       const assignmentId = record.assignmentId || 'legacy';
       const targetDir = path.join(uploadRoot, 'homework', String(assignmentId));
       const safeName = sanitizeFileName(fileName);
-      const storedName = `${record.id}-${Date.now()}-${safeName}`;
+      const storedName = `${record.id}-${Date.now()}-${crypto.randomUUID()}-${safeName}`;
       const filePath = path.join(targetDir, storedName);
+      const previousFile = { filePath: record.filePath };
       fs.mkdirSync(targetDir, { recursive: true });
-      removeStoredHomeworkFile(record, uploadRoot);
       fs.writeFileSync(filePath, content);
 
       record.submitStatus = 'submitted';
@@ -380,6 +426,7 @@ function createAppWithOptions({
       record.filePath = filePath;
       record.fileSize = content.length;
       record.fileType = inferHomeworkFileType(fileName) || input.contentType || 'application/octet-stream';
+      removeStoredHomeworkFile(previousFile, uploadRoot);
       return withHomeworkStudent(db, record);
     },
 
@@ -388,6 +435,9 @@ function createAppWithOptions({
       if (!record) throw new Error('homework record not found');
       if (session.role === 'student' && Number(session.studentId) !== Number(record.studentId)) {
         throw createHttpError('forbidden', 403);
+      }
+      if (session.role === 'teacher') {
+        assertHomeworkClassAccess(session, record.className);
       }
       if (!record.filePath || !fs.existsSync(record.filePath)) {
         throw createHttpError('homework file not found', 404);
@@ -468,7 +518,11 @@ function createAppWithOptions({
         confirmedByRole: input.confirmedByRole || '',
         confirmedByName: input.confirmedByName || '',
         confirmedAt: input.confirmedAt || '',
-        remark: input.remark || ''
+        remark: input.remark || '',
+        transcriptFileName: input.transcriptFileName || '',
+        transcriptFilePath: input.transcriptFilePath || '',
+        transcriptFileSize: input.transcriptFileSize || 0,
+        transcriptUploadedAt: input.transcriptUploadedAt || ''
       };
       assertScheduleTime(schedule);
       assertNoScheduleConflict(db.interviewSchedules, schedule);
@@ -476,8 +530,8 @@ function createAppWithOptions({
       return schedule;
     },
 
-    approveInterviewSchedule(id, input = {}) {
-      return confirmInterviewSchedule(db, id, input, 'admin');
+    approveInterviewSchedule(id, input = {}, confirmedByRole = 'admin') {
+      return confirmInterviewSchedule(db, id, input, confirmedByRole);
     },
 
     acceptInterviewSchedule(id, input = {}) {
@@ -493,6 +547,8 @@ function createAppWithOptions({
     },
 
     requestInterviewSchedule(input) {
+      assertTeacherParticipatesInScheduling(baseAuthAccounts, db, teacherDirectory, input.teacherId);
+      assertStudentCanRequestSchedule(db, input.studentId);
       return this.createInterviewSchedule({ ...input, status: 'requested', requestSource: 'student' });
     },
 
@@ -552,6 +608,51 @@ function createAppWithOptions({
       return schedule;
     },
 
+    submitInterviewTranscriptFile(id, input = {}) {
+      const schedule = db.interviewSchedules.find((item) => item.id === Number(id));
+      if (!schedule) throw new Error('schedule not found');
+      if (input.studentId !== undefined && Number(input.studentId) !== Number(schedule.studentId)) {
+        throw createHttpError('forbidden', 403);
+      }
+      if (schedule.status !== 'completed') {
+        throw new Error('schedule transcript requires completed interview');
+      }
+
+      const fileName = String(input.fileName || '').trim();
+      const content = Buffer.isBuffer(input.content) ? input.content : Buffer.from(input.content || '');
+      assertAllowedTranscriptFile(fileName, content, maxTranscriptFileBytes);
+
+      const targetDir = path.join(uploadRoot, 'interviews', String(schedule.id));
+      const safeName = sanitizeFileName(fileName);
+      const storedName = `${schedule.id}-${Date.now()}-${safeName}`;
+      const filePath = path.join(targetDir, storedName);
+      fs.mkdirSync(targetDir, { recursive: true });
+      removeStoredInterviewTranscriptFile(schedule, uploadRoot);
+      fs.writeFileSync(filePath, content);
+
+      schedule.transcriptFileName = fileName;
+      schedule.transcriptFilePath = filePath;
+      schedule.transcriptFileSize = content.length;
+      schedule.transcriptUploadedAt = input.uploadedAt || new Date().toISOString();
+      return schedule;
+    },
+
+    getInterviewTranscriptFile(id, session = {}) {
+      const schedule = db.interviewSchedules.find((item) => item.id === Number(id));
+      if (!schedule) throw new Error('schedule not found');
+      if (!canReadInterviewTranscript(schedule, session)) {
+        throw createHttpError('forbidden', 403);
+      }
+      if (!schedule.transcriptFilePath || !fs.existsSync(schedule.transcriptFilePath)) {
+        throw createHttpError('interview transcript file not found', 404);
+      }
+      return {
+        fileName: schedule.transcriptFileName || path.basename(schedule.transcriptFilePath),
+        contentType: 'text/plain; charset=utf-8',
+        body: fs.readFileSync(schedule.transcriptFilePath)
+      };
+    },
+
     listInterviewSchedules(filters = {}) {
       const items = db.interviewSchedules.filter((schedule) => {
         if (filters.teacherId && schedule.teacherId !== Number(filters.teacherId)) return false;
@@ -559,9 +660,27 @@ function createAppWithOptions({
         if (filters.status && schedule.status !== filters.status) return false;
         if (filters.from && schedule.endsAt <= filters.from) return false;
         if (filters.to && schedule.startsAt >= filters.to) return false;
+        if (filters.keyword) {
+          const keyword = String(filters.keyword || '').trim();
+          const text = `${schedule.studentName || ''} ${schedule.companyName || ''} ${schedule.positionName || ''}`;
+          if (keyword && !text.includes(keyword)) return false;
+        }
         return true;
       });
       return { items, total: items.length };
+    },
+
+    listStudentWeeklySchedules(session = {}, filters = {}) {
+      if (!session?.studentId) throw new Error('student account not bound');
+      const studentId = Number(session.studentId);
+      const days = buildWeek(filters.weekStart || currentWeekStart());
+      const from = `${days[0]}T00:00:00`;
+      const to = `${days[6]}T23:59:59`;
+      const entries = this.listInterviewSchedules({ from, to }).items
+        .filter((schedule) => schedule.status !== 'cancelled')
+        .sort((left, right) => left.startsAt.localeCompare(right.startsAt))
+        .map((schedule) => redactScheduleForStudent(schedule, studentId));
+      return { weeks: days, entries };
     },
 
     listInterviewScheduleTimeline(filters = {}) {
@@ -596,7 +715,8 @@ function createAppWithOptions({
         student,
         homeworkRecords: this.listHomeworkRecords({ studentId }).items,
         interviewRecords: this.listInterviewRecords({ studentId }).items,
-        schedules: this.listInterviewSchedules({ studentId }).items
+        schedules: this.listInterviewSchedules({ studentId }).items,
+        scheduleGuard: buildStudentScheduleGuard(db, studentId)
       };
     },
 
@@ -635,8 +755,89 @@ function createAppWithOptions({
       return buildHomeworkAnalytics(db, filters);
     },
 
-    listTeachers() {
-      return { items: teacherDirectory.map((teacher) => ({ ...teacher })), total: teacherDirectory.length };
+    listTeachers(filters = {}) {
+      const items = buildTeacherProfiles(baseAuthAccounts, db, teacherDirectory, filters)
+        .filter((teacher) => !filters.forStudent || teacher.participatesInScheduling);
+      return { items, total: items.length };
+    },
+
+    updateTeacherScheduling(session = {}, input = {}) {
+      if (!session.teacherId || !session.username) throw createHttpError('teacher account not bound', 403);
+      const account = findAuthAccountByKey(baseAuthAccounts, db, `username:${session.username}`, { required: false });
+      if (!account) throw new Error('teacher account not found');
+      const stored = ensureStoredAccount(baseAuthAccounts, db, account);
+      stored.participatesInScheduling = input.participatesInScheduling === true;
+      session.participatesInScheduling = stored.participatesInScheduling;
+      const teacher = publicTeacherAccount(stored, teacherDirectory, db);
+      return teacher;
+    },
+
+    listTeacherAccounts() {
+      const items = buildTeacherProfiles(baseAuthAccounts, db, teacherDirectory, { includeDisabled: true });
+      return { items, total: items.length };
+    },
+
+    createTeacherAccount(input = {}) {
+      const username = String(input.username || '').trim();
+      const teacherName = String(input.teacherName || '').trim();
+      if (!username || !teacherName) throw new Error('teacher username and name are required');
+      const existing = listAllAuthAccounts(baseAuthAccounts, db, { includeDisabled: true })
+        .find((account) => account.username === username);
+      if (existing) throw new Error('account username already exists');
+      const initialPassword = String(input.initialPassword || '').trim() || generateInitialPassword();
+      const account = {
+        id: db.nextAuthAccountId++,
+        username,
+        password: '',
+        passwordHash: hashPassword(initialPassword),
+        role: 'teacher',
+        teacherId: nextTeacherId(baseAuthAccounts, db, teacherDirectory),
+        studentId: null,
+        teacherName,
+        classNames: normalizeClassNameList(input.classNames),
+        participatesInScheduling: input.participatesInScheduling === true,
+        status: 'active',
+        createdAt: new Date().toISOString(),
+        passwordUpdatedAt: new Date().toISOString()
+      };
+      db.authAccounts.push(account);
+      for (const className of account.classNames) ensureClassOption(db, className);
+      return publicTeacherAccount(account, teacherDirectory, db, { initialPassword });
+    },
+
+    updateTeacherAccount(accountKey, input = {}) {
+      const account = findAuthAccountByKey(baseAuthAccounts, db, accountKey, { required: false });
+      if (!account || account.role !== 'teacher') throw new Error('teacher account not found');
+      const stored = ensureStoredAccount(baseAuthAccounts, db, account);
+      if (input.teacherName !== undefined) stored.teacherName = String(input.teacherName || '').trim();
+      if (input.classNames !== undefined) {
+        stored.classNames = normalizeClassNameList(input.classNames);
+        for (const className of stored.classNames) ensureClassOption(db, className);
+      }
+      if (input.participatesInScheduling !== undefined) {
+        stored.participatesInScheduling = input.participatesInScheduling === true;
+      }
+      if (input.status !== undefined) {
+        stored.status = input.status === 'disabled' ? 'disabled' : 'active';
+      }
+      return publicTeacherAccount(stored, teacherDirectory, db);
+    },
+
+    disableTeacherAccount(accountKey) {
+      const account = findAuthAccountByKey(baseAuthAccounts, db, accountKey, { required: false });
+      if (!account || account.role !== 'teacher') throw new Error('teacher account not found');
+      const stored = ensureStoredAccount(baseAuthAccounts, db, account);
+      stored.status = 'disabled';
+      return publicTeacherAccount(stored, teacherDirectory, db);
+    },
+
+    disableStudentAccount(studentId) {
+      const account = listAllAuthAccounts(baseAuthAccounts, db, { includeDisabled: true })
+        .find((item) => item.role === 'student' && Number(item.studentId) === Number(studentId));
+      if (!account) throw new Error('student account not found');
+      const stored = ensureStoredAccount(baseAuthAccounts, db, account);
+      stored.status = 'disabled';
+      return publicStudentAccount(db, stored);
     },
 
     listClasses(filters = {}) {
@@ -688,7 +889,10 @@ function createAppWithOptions({
         recordLoginFailure(loginFailures, normalizedUsername);
         throw new Error('invalid credentials');
       }
-      if (upgradeLegacyAccountPassword(account, password)) {
+      const upgradeTarget = account.source === 'stored'
+        ? db.authAccounts.find((item) => Number(item.id) === Number(account.id)) || account
+        : account;
+      if (upgradeLegacyAccountPassword(upgradeTarget, password)) {
         db.save();
       }
       loginFailures.delete(normalizedUsername);
@@ -698,6 +902,10 @@ function createAppWithOptions({
         username: account.username,
         teacherId: account.teacherId || null,
         studentId: account.studentId || null,
+        teacherName: account.role === 'teacher'
+          ? (account.teacherName || teacherDirectory.find((teacher) => Number(teacher.id) === Number(account.teacherId))?.name || '')
+          : '',
+        participatesInScheduling: account.role === 'teacher' ? account.participatesInScheduling === true : false,
         classNames: account.role === 'teacher' ? teacherClassNamesForAccount(db, account) : [],
         expiresAt: Date.now() + sessionMaxAgeMs
       };
@@ -747,18 +955,29 @@ function createAppWithOptions({
 
     exportHomeworkRecords(filters = {}) {
       const records = this.listHomeworkRecords(filters).items;
-      const rows = [['作业名称', '学生姓名', '手机号', '班级/课程', '提交状态', '提交时间', '文件名', '备注']];
+      const rows = [['作业名称', '学生姓名', '手机号', '班级/课程', '提交状态', '逾期状态', '提交时间', '文件名', '备注']];
       for (const record of records) {
-        rows.push([record.homeworkName, record.studentName || `#${record.studentId}`, record.studentPhone || '', record.className, statusLabel(record.submitStatus), record.submitAt, record.fileName || '', record.remark]);
+        rows.push([
+          record.homeworkName,
+          record.studentName || `#${record.studentId}`,
+          record.studentPhone || '',
+          record.className,
+          statusLabel(record.submitStatus),
+          homeworkLateStatusLabel(record.lateStatus),
+          record.submitAt,
+          record.fileName || '',
+          record.remark
+        ]);
       }
       return toCsvWithBom(rows);
     },
 
-    exportHomeworkAssignmentZip(assignmentId) {
+    exportHomeworkAssignmentZip(assignmentId, session = {}) {
       const assignment = db.homeworkAssignments.find((item) => item.id === Number(assignmentId));
       if (!assignment) throw new Error('homework assignment not found');
+      assertHomeworkClassAccess(session, assignment.className);
       const records = this.listHomeworkRecords({ assignmentId }).items;
-      const rows = [['作业名称', '班级/课程', '学生姓名', '手机号', '提交状态', '提交时间', '文件名', '备注']];
+      const rows = [['作业名称', '班级/课程', '学生姓名', '手机号', '提交状态', '逾期状态', '提交时间', '文件名', '备注']];
       const entries = [];
 
       for (const record of records) {
@@ -768,6 +987,7 @@ function createAppWithOptions({
           record.studentName || `#${record.studentId}`,
           record.studentPhone || '',
           statusLabel(record.submitStatus),
+          homeworkLateStatusLabel(record.lateStatus),
           record.submitAt || '',
           record.fileName || '',
           record.remark || ''
@@ -792,14 +1012,19 @@ function createAppWithOptions({
       };
     },
 
-    exportHomeworkStudentZip(studentId, filters = {}) {
+    exportHomeworkStudentZip(studentId, filters = {}, session = {}) {
       const student = requireExistingStudent(db, studentId);
+      if (session.role === 'teacher') {
+        assertHomeworkClassAccess(session, student.className);
+        if (filters.className) assertHomeworkClassAccess(session, filters.className);
+      }
       const records = this.listHomeworkRecords({
         studentId: student.id,
         assignmentId: filters.assignmentId,
-        className: filters.className
+        className: filters.className,
+        classNames: session.role === 'teacher' ? session.classNames : filters.classNames
       }).items;
-      const rows = [['作业名称', '班级/课程', '学生姓名', '手机号', '提交状态', '提交时间', '文件名', '备注']];
+      const rows = [['作业名称', '班级/课程', '学生姓名', '手机号', '提交状态', '逾期状态', '提交时间', '文件名', '备注']];
       const entries = [];
 
       for (const record of records) {
@@ -809,6 +1034,7 @@ function createAppWithOptions({
           record.studentName || student.name || `#${record.studentId}`,
           record.studentPhone || student.phone || '',
           statusLabel(record.submitStatus),
+          homeworkLateStatusLabel(record.lateStatus),
           record.submitAt || '',
           record.fileName || '',
           record.remark || ''
@@ -879,12 +1105,76 @@ function normalizeAuthAccounts(authAccounts) {
   });
 }
 
-function listAllAuthAccounts(baseAuthAccounts, db) {
+function listAllAuthAccounts(baseAuthAccounts, db, options = {}) {
   const storedAccounts = Array.isArray(db.authAccounts) ? db.authAccounts : [];
-  return [
-    ...baseAuthAccounts,
-    ...storedAccounts
-  ].filter((account) => account.status !== 'disabled');
+  const byUsername = new Map();
+
+  for (const account of baseAuthAccounts) {
+    byUsername.set(account.username, {
+      ...account,
+      source: 'config',
+      accountKey: `username:${account.username}`
+    });
+  }
+
+  for (const account of storedAccounts) {
+    const previous = byUsername.get(account.username) || {};
+    byUsername.set(account.username, {
+      ...previous,
+      ...account,
+      source: 'stored',
+      accountKey: `stored:${account.id}`
+    });
+  }
+
+  const accounts = Array.from(byUsername.values());
+  return options.includeDisabled ? accounts : accounts.filter((account) => account.status !== 'disabled');
+}
+
+function findAuthAccountByKey(baseAuthAccounts, db, accountKey, options = {}) {
+  const key = String(accountKey || '').trim();
+  return listAllAuthAccounts(baseAuthAccounts, db, { includeDisabled: true })
+    .find((account) => {
+      if (account.accountKey === key) return true;
+      if (key.startsWith('username:') && account.username === key.slice('username:'.length)) return true;
+      if (key.startsWith('stored:') && Number(account.id) === Number(key.slice('stored:'.length))) return true;
+      return false;
+    }) || (options.required === false ? null : undefined);
+}
+
+function ensureStoredAccount(baseAuthAccounts, db, account) {
+  if (account?.source === 'stored') {
+    const stored = db.authAccounts.find((item) => Number(item.id) === Number(account.id));
+    if (stored) return stored;
+  }
+
+  const copy = {
+    id: db.nextAuthAccountId++,
+    username: account.username,
+    password: account.password || '',
+    passwordHash: account.passwordHash || '',
+    role: account.role,
+    teacherId: account.teacherId || null,
+    studentId: account.studentId || null,
+    teacherName: account.teacherName || '',
+    classNames: normalizeClassNameList(account.classNames),
+    participatesInScheduling: account.participatesInScheduling === true,
+    status: account.status || 'active',
+    createdAt: account.createdAt || new Date().toISOString(),
+    passwordUpdatedAt: account.passwordUpdatedAt || ''
+  };
+  db.authAccounts.push(copy);
+  return copy;
+}
+
+function normalizeClassNameList(values) {
+  if (!Array.isArray(values)) return [];
+  const result = [];
+  for (const value of values) {
+    const className = String(value || '').trim();
+    if (className && !result.includes(className)) result.push(className);
+  }
+  return result;
 }
 
 function findClassOption(db, className) {
@@ -1020,6 +1310,58 @@ function publicStudentAccount(db, account, options = {}) {
   return payload;
 }
 
+function buildTeacherProfiles(baseAuthAccounts, db, teacherDirectory, filters = {}) {
+  const accountProfiles = listAllAuthAccounts(baseAuthAccounts, db, { includeDisabled: filters.includeDisabled === true })
+    .filter((account) => account.role === 'teacher')
+    .map((account) => publicTeacherAccount(account, teacherDirectory, db));
+  const accountTeacherIds = new Set(accountProfiles.map((teacher) => Number(teacher.id)));
+  const legacyProfiles = filters.includeDisabled
+    ? []
+    : teacherDirectory
+      .filter((teacher) => !accountTeacherIds.has(Number(teacher.id)))
+      .map((teacher) => ({
+        id: teacher.id,
+        teacherId: teacher.id,
+        name: teacher.name,
+        teacherName: teacher.name,
+        username: '',
+        classNames: [],
+        participatesInScheduling: true,
+        status: 'active',
+        accountKey: ''
+      }));
+
+  return [...accountProfiles, ...legacyProfiles]
+    .sort((left, right) => Number(left.id) - Number(right.id));
+}
+
+function publicTeacherAccount(account, teacherDirectory, db, options = {}) {
+  const directoryTeacher = teacherDirectory.find((teacher) => Number(teacher.id) === Number(account.teacherId));
+  const teacherName = account.teacherName || directoryTeacher?.name || account.username || `teacher${account.teacherId}`;
+  const payload = {
+    id: account.teacherId,
+    teacherId: account.teacherId,
+    name: teacherName,
+    teacherName,
+    username: account.username,
+    classNames: teacherClassNamesForAccount(db, account),
+    participatesInScheduling: account.participatesInScheduling === true,
+    status: account.status || 'active',
+    accountKey: account.accountKey || (account.source === 'stored' ? `stored:${account.id}` : `username:${account.username}`),
+    createdAt: account.createdAt || ''
+  };
+  if (options.initialPassword) payload.initialPassword = options.initialPassword;
+  return payload;
+}
+
+function nextTeacherId(baseAuthAccounts, db, teacherDirectory) {
+  const maxFromAccounts = listAllAuthAccounts(baseAuthAccounts, db, { includeDisabled: true })
+    .filter((account) => account.role === 'teacher')
+    .reduce((max, account) => Math.max(max, Number(account.teacherId) || 0), 0);
+  const maxFromDirectory = teacherDirectory.reduce((max, teacher) => Math.max(max, Number(teacher.id) || 0), 0);
+  return Math.max(maxFromAccounts, maxFromDirectory) + 1;
+}
+
 function verifyAccountPassword(account, password) {
   if (account.passwordHash) {
     return verifyPassword(password, account.passwordHash);
@@ -1067,20 +1409,48 @@ function normalizeTeachers(teachers) {
   }));
 }
 
-function withHomeworkAssignmentStats(db, assignment) {
+function withHomeworkAssignmentStats(db, assignment, now = new Date().toISOString()) {
   const records = db.homeworkRecords.filter((record) => Number(record.assignmentId) === Number(assignment.id));
   const submittedCount = records.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length;
+  const overduePendingCount = records.filter((record) => homeworkLateStatus(record, now) === 'overduePending').length;
+  const lateSubmittedCount = records.filter((record) => homeworkLateStatus(record, now) === 'lateSubmitted').length;
   const totalCount = records.length;
   return {
     ...assignment,
     totalCount,
     submittedCount,
-    pendingCount: totalCount - submittedCount
+    pendingCount: totalCount - submittedCount,
+    overduePendingCount,
+    lateSubmittedCount
   };
 }
 
 function isHomeworkSubmittedStatus(status) {
   return status === 'submitted' || status === 'reviewed';
+}
+
+function assertHomeworkClassAccess(session = {}, className = '') {
+  if (session.role !== 'teacher') return;
+  const classNames = Array.isArray(session.classNames) ? session.classNames : [];
+  if (!classNames.includes(className || '')) {
+    throw createHttpError('forbidden', 403);
+  }
+}
+
+function homeworkLateStatus(record, now = new Date().toISOString()) {
+  if (!record?.dueDate) return '';
+  const dueTime = Date.parse(`${record.dueDate}T23:59:59`);
+  if (!Number.isFinite(dueTime)) return '';
+  if (isHomeworkSubmittedStatus(record.submitStatus)) {
+    if (!record.submitAt) return '';
+    const submitTime = Date.parse(record.submitAt);
+    if (!Number.isFinite(submitTime)) return '';
+    return submitTime > dueTime ? 'lateSubmitted' : '';
+  }
+
+  const nowTime = Date.parse(now);
+  if (!Number.isFinite(nowTime)) return '';
+  return nowTime > dueTime ? 'overduePending' : '';
 }
 
 function buildHomeworkAnalytics(db, filters = {}) {
@@ -1107,7 +1477,7 @@ function buildHomeworkAnalytics(db, filters = {}) {
         className: assignment.className,
         dueDate: assignment.dueDate || '',
         createdAt: assignment.createdAt || '',
-        ...completionStats(assignmentRecords)
+        ...completionStats(assignmentRecords, filters.now)
       };
     }),
     students: students.map((student) => {
@@ -1125,6 +1495,8 @@ function buildHomeworkAnalytics(db, filters = {}) {
         assignedCount: studentRecords.length,
         submittedCount: studentRecords.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length,
         pendingCount: studentRecords.filter((record) => !isHomeworkSubmittedStatus(record.submitStatus)).length,
+        overduePendingCount: studentRecords.filter((record) => homeworkLateStatus(record, filters.now) === 'overduePending').length,
+        lateSubmittedCount: studentRecords.filter((record) => homeworkLateStatus(record, filters.now) === 'lateSubmitted').length,
         completionRate: percentage(studentRecords.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length, studentRecords.length),
         latestSubmitAt
       };
@@ -1222,12 +1594,14 @@ function buildLatestHomeworkAssignment(db, assignment, records) {
   };
 }
 
-function completionStats(records) {
+function completionStats(records, now = new Date().toISOString()) {
   const submittedCount = records.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length;
   return {
     totalCount: records.length,
     submittedCount,
     pendingCount: records.length - submittedCount,
+    overduePendingCount: records.filter((record) => homeworkLateStatus(record, now) === 'overduePending').length,
+    lateSubmittedCount: records.filter((record) => homeworkLateStatus(record, now) === 'lateSubmitted').length,
     completionRate: percentage(submittedCount, records.length)
   };
 }
@@ -1237,12 +1611,14 @@ function percentage(part, total) {
   return Math.round((part / total) * 100);
 }
 
-function withHomeworkStudent(db, record) {
+function withHomeworkStudent(db, record, now = new Date().toISOString()) {
   const student = db.students.find((item) => item.id === record.studentId);
   return {
     ...record,
     studentName: student?.name || '',
-    studentPhone: student?.phone || ''
+    studentPhone: student?.phone || '',
+    lateStatus: homeworkLateStatus(record, now),
+    lateStatusText: homeworkLateStatusLabel(homeworkLateStatus(record, now))
   };
 }
 
@@ -1276,6 +1652,19 @@ function assertAllowedHomeworkFile(fileName, content, maxBytes) {
   }
 }
 
+function assertAllowedTranscriptFile(fileName, content, maxBytes) {
+  const extension = path.extname(fileName).toLowerCase();
+  if (!ALLOWED_TRANSCRIPT_FILE_EXTENSIONS.has(extension)) {
+    throw new Error('unsupported interview transcript file type');
+  }
+  if (!content.length) {
+    throw new Error('interview transcript file is required');
+  }
+  if (content.length > maxBytes) {
+    throw createHttpError('interview transcript file too large', 413);
+  }
+}
+
 function inferHomeworkFileType(fileName) {
   const extension = path.extname(fileName).toLowerCase();
   const types = {
@@ -1299,6 +1688,16 @@ function removeStoredHomeworkFile(record, uploadRoot) {
   }
 }
 
+function removeStoredInterviewTranscriptFile(schedule, uploadRoot) {
+  if (!schedule.transcriptFilePath) return;
+  const resolvedFile = path.resolve(schedule.transcriptFilePath);
+  const resolvedRoot = path.resolve(uploadRoot);
+  if (!resolvedFile.startsWith(`${resolvedRoot}${path.sep}`)) return;
+  if (fs.existsSync(resolvedFile)) {
+    fs.unlinkSync(resolvedFile);
+  }
+}
+
 function statusLabel(status) {
   const labels = {
     pending: '待提交',
@@ -1308,15 +1707,96 @@ function statusLabel(status) {
   return labels[status] || status || '';
 }
 
+function homeworkLateStatusLabel(status) {
+  const labels = {
+    overduePending: '逾期未交',
+    lateSubmitted: '迟交'
+  };
+  return labels[status] || '';
+}
+
 function confirmInterviewSchedule(db, id, input, confirmedByRole) {
   const schedule = db.interviewSchedules.find((item) => item.id === id);
   if (!schedule) throw new Error('schedule not found');
+  if (schedule.status === 'confirmed') return schedule;
   assertScheduleTransition(schedule, ['requested'], 'confirmed');
   schedule.status = 'confirmed';
   schedule.confirmedByRole = confirmedByRole;
   schedule.confirmedByName = input.approverName || input.confirmedByName || '';
   schedule.confirmedAt = input.confirmedAt || new Date().toISOString();
   return schedule;
+}
+
+function assertTeacherParticipatesInScheduling(baseAuthAccounts, db, teacherDirectory, teacherId) {
+  const normalizedTeacherId = normalizeRequiredId(teacherId, 'teacherId is required');
+  const teacher = buildTeacherProfiles(baseAuthAccounts, db, teacherDirectory)
+    .find((item) => Number(item.id) === normalizedTeacherId);
+  if (!teacher) throw new Error('teacher not available for scheduling');
+  if (teacher.username && teacher.participatesInScheduling !== true) {
+    throw new Error('teacher not available for scheduling');
+  }
+}
+
+function assertStudentCanRequestSchedule(db, studentId) {
+  const guard = buildStudentScheduleGuard(db, normalizeRequiredId(studentId, 'studentId is required'));
+  if (guard.canRequest) return;
+  throw new Error(guard.reason);
+}
+
+function buildStudentScheduleGuard(db, studentId) {
+  const studentSchedules = db.interviewSchedules.filter((schedule) => Number(schedule.studentId) === Number(studentId));
+  const pendingTranscriptSchedules = studentSchedules
+    .filter(isScheduleTranscriptRequired)
+    .sort((left, right) => String(right.startsAt || '').localeCompare(String(left.startsAt || '')));
+  const unfinishedCount = studentSchedules.filter((schedule) => UNFINISHED_SCHEDULE_STATUSES.has(schedule.status)).length;
+  let reason = '';
+
+  if (pendingTranscriptSchedules.length) {
+    reason = 'interview transcript required';
+  } else if (unfinishedCount >= MAX_UNFINISHED_STUDENT_SCHEDULES) {
+    reason = 'unfinished schedule limit reached';
+  }
+
+  return {
+    canRequest: !reason,
+    reason,
+    unfinishedCount,
+    maxUnfinishedCount: MAX_UNFINISHED_STUDENT_SCHEDULES,
+    pendingTranscriptSchedules: pendingTranscriptSchedules.map((schedule) => ({ ...schedule }))
+  };
+}
+
+function isScheduleTranscriptRequired(schedule) {
+  return schedule.status === 'completed' && (!schedule.transcriptUploadedAt || !schedule.transcriptFilePath);
+}
+
+function redactScheduleForStudent(schedule, currentStudentId) {
+  const isOwn = Number(schedule.studentId) === Number(currentStudentId);
+  const entry = {
+    id: schedule.id,
+    teacherId: schedule.teacherId,
+    teacherName: schedule.teacherName || '',
+    companyName: schedule.companyName || '',
+    positionName: schedule.positionName || '',
+    startsAt: schedule.startsAt || '',
+    endsAt: schedule.endsAt || '',
+    status: schedule.status || '',
+    isOwn,
+    studentName: isOwn ? (schedule.studentName || '') : ''
+  };
+  if (isOwn) {
+    entry.studentId = schedule.studentId;
+    entry.transcriptFileName = schedule.transcriptFileName || '';
+    entry.transcriptUploadedAt = schedule.transcriptUploadedAt || '';
+  }
+  return entry;
+}
+
+function canReadInterviewTranscript(schedule, session = {}) {
+  if (session.role === 'admin') return true;
+  if (session.role === 'teacher') return Number(session.teacherId) === Number(schedule.teacherId);
+  if (session.role === 'student') return Number(session.studentId) === Number(schedule.studentId);
+  return false;
 }
 
 function requireScheduleFields(input) {
@@ -1361,6 +1841,14 @@ function buildWeek(weekStart) {
     date.setDate(start.getDate() + index);
     return date.toISOString().slice(0, 10);
   });
+}
+
+function currentWeekStart() {
+  const now = new Date();
+  const day = now.getDay() || 7;
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - day + 1);
+  return monday.toISOString().slice(0, 10);
 }
 
 function requireExistingStudent(db, value) {
@@ -1416,9 +1904,19 @@ function createHttpError(message, statusCode) {
   return error;
 }
 
-function previewStudentImport(db, text) {
-  const rows = parseCsv(text);
-  const { dataRows, header } = splitImportHeader(rows);
+function previewStudentImport(db, input = {}) {
+  const options = typeof input === 'string' ? { text: input } : input;
+  const mode = String(options.mode || '').trim();
+  const parsedSimplePaste = mode === 'simplePaste'
+    ? parseSimplePasteRows(options.text || options.csv || '', options.defaultClassName)
+    : null;
+  const rows = parsedSimplePaste ? parsedSimplePaste.rows : parseCsv(options.text || options.csv || '');
+  const { dataRows, header } = parsedSimplePaste
+    ? { dataRows: rows, header: { name: 0, className: 1 } }
+    : splitImportHeader(rows);
+  const rowNumberBase = parsedSimplePaste
+    ? (parsedSimplePaste.hasHeader ? 2 : 1)
+    : (header ? 2 : 1);
   const existingPhones = new Set(db.students.map((student) => student.phone).filter(Boolean));
   const existingClasses = new Set((db.classes || []).map((item) => item.className).filter(Boolean));
   const seenPhones = new Set();
@@ -1439,7 +1937,7 @@ function previewStudentImport(db, text) {
     }
 
     return {
-      rowNumber: header ? index + 2 : index + 1,
+      rowNumber: index + rowNumberBase,
       student,
       errors
     };
@@ -1450,6 +1948,32 @@ function previewStudentImport(db, text) {
     validCount: previewRows.filter((row) => row.errors.length === 0).length,
     invalidCount: previewRows.filter((row) => row.errors.length > 0).length
   };
+}
+
+function parseSimplePasteRows(text, defaultClassName = '') {
+  const fallbackClassName = String(defaultClassName || '').trim();
+  const lines = String(text || '').replace(/^\ufeff/, '').split(/\r?\n/);
+  const rows = [];
+
+  for (const line of lines) {
+    const raw = line.replace(/\r$/, '');
+    if (!raw.trim()) continue;
+    let cells = raw.includes('\t')
+      ? raw.split('\t').map((cell) => cell.trim())
+      : raw.trim().split(/\s{2,}|,|，/).map((cell) => cell.trim()).filter((cell) => cell);
+    if (cells.length === 1 && fallbackClassName) cells = [cells[0], fallbackClassName];
+    rows.push([cells[0] || '', cells[1] || '']);
+  }
+
+  const hasHeader = rows.length > 0 && isSimplePasteHeader(rows[0]);
+  return { rows: hasHeader ? rows.slice(1) : rows, hasHeader };
+}
+
+function isSimplePasteHeader(row) {
+  const first = String(row[0] || '').toLowerCase();
+  const second = String(row[1] || '').toLowerCase();
+  return first === 'name' || first.includes('姓名') || first.includes('濮撳悕') ||
+    second.includes('class') || second.includes('班级') || second.includes('鐝骇');
 }
 
 function parseCsv(text) {

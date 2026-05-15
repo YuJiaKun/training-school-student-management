@@ -21,6 +21,13 @@ const ERROR_TEXT_MAP = {
   'unsupported homework file type': '仅支持上传 TXT 文件',
   'homework file too large': '作业文件过大，请压缩或拆分后再上传',
   'interview record not found': '未找到对应面试记录',
+  'interview transcript required': '请先上传已完成面试的 TXT 面试记录',
+  'unfinished schedule limit reached': '当前未完成面试已达 3 个，请等待处理后再申请',
+  'interview transcript file is required': '请选择要上传的 TXT 面试记录',
+  'interview transcript file not found': '未找到已上传的面试记录文件',
+  'unsupported interview transcript file type': '面试记录仅支持上传 TXT 文件',
+  'interview transcript file too large': '面试记录文件过大，请压缩或拆分后再上传',
+  'schedule transcript requires completed interview': '面试完成后才能上传面试记录',
   'schedule not found': '未找到对应面试安排',
   'schedule fields are required': '请完整填写面试安排信息',
   'invalid schedule time': '面试开始时间必须早于结束时间',
@@ -33,7 +40,12 @@ const ERROR_TEXT_MAP = {
   'request body too large': '请求内容过大，请减少备注内容后再试',
   'unsupported content type': '请求格式不支持',
   'too many login attempts': '登录失败次数过多，请稍后再试',
-  'student import contains invalid rows': '导入内容没有可导入行，请先根据预览修正'
+  'student import contains invalid rows': '导入内容没有可导入行，请先根据预览修正',
+  'teacher not available for scheduling': '该老师暂未开启面试排期，请选择其他老师或联系老师开启',
+  'teacher username and name are required': '请填写老师账号和老师姓名',
+  'account username already exists': '账号已存在，请更换用户名',
+  'teacher account not found': '未找到老师账号',
+  'student account not found': '该学生暂未生成账号'
 };
 
 async function request(method, path, body) {
@@ -106,6 +118,10 @@ export function apiPatch(path, body) {
   return request('PATCH', path, body);
 }
 
+export function apiDelete(path) {
+  return request('DELETE', path);
+}
+
 export async function apiUpload(path, formData) {
   const options = {
     method: 'POST',
@@ -134,6 +150,7 @@ export const api = {
   get: apiGet,
   post: apiPost,
   patch: apiPatch,
+  delete: apiDelete,
   upload: apiUpload
 };
 
