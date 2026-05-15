@@ -715,6 +715,21 @@ textarea:focus {
   max-width: 260px;
 }
 
+.inline-checkbox {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.inline-checkbox input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+
 .form-grid,
 .schedule-form {
   display: grid;
@@ -983,23 +998,33 @@ tr:last-child td {
   margin-top: 12px;
 }
 
+.assignment-card-shell {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  padding: 12px;
+}
+
+.assignment-card-shell:hover,
+.assignment-card-shell.is-active {
+  border-color: #bcd4ff;
+  background: #f7fbff;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.08);
+}
+
 .assignment-card {
   width: 100%;
   display: grid;
   gap: 6px;
   text-align: left;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #fff;
+  border: 0;
+  background: transparent;
   color: var(--text);
-  padding: 13px;
-}
-
-.assignment-card:hover,
-.assignment-card.is-active {
-  border-color: #bcd4ff;
-  background: #f7fbff;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.08);
+  padding: 0;
 }
 
 .assignment-card span,
@@ -1016,6 +1041,12 @@ tr:last-child td {
 
 .assignment-card b {
   color: var(--primary-dark);
+}
+
+.assignment-delete-button {
+  min-height: 32px;
+  justify-self: start;
+  padding: 0 10px;
 }
 
 .assignment-detail-panel {
@@ -1616,6 +1647,123 @@ tr:last-child td {
   gap: 18px;
 }
 
+.student-summary-card {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(360px, 1.3fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
+.student-summary-main {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+}
+
+.student-summary-main h2 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.student-summary-main p,
+.student-summary-main span {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.student-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.student-workspace-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.9fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.student-side-column,
+.homework-card-list,
+.student-profile-form {
+  display: grid;
+  gap: 12px;
+}
+
+.student-profile-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.student-homework-panel {
+  min-width: 0;
+}
+
+.homework-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 14px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.homework-card-main {
+  min-width: 0;
+}
+
+.homework-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.homework-card-title strong {
+  overflow-wrap: anywhere;
+}
+
+.homework-meta {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.student-placeholder-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  border-style: dashed;
+  background: linear-gradient(180deg, #f8fafc, #fff);
+}
+
+.placeholder-icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #e2e8f0;
+  color: #475569;
+  font-weight: 900;
+}
+
+.student-mini-record {
+  display: block;
+}
+
+.teacher-student-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
 .schedule-week-table {
   min-width: 980px;
   border: 1px solid var(--line);
@@ -1709,6 +1857,8 @@ tr:last-child td {
   .quick-entry-grid,
   .workspace-grid,
   .student-profile,
+  .student-summary-card,
+  .student-workspace-layout,
   .assignment-board {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1766,6 +1916,11 @@ tr:last-child td {
   }
 
   .assignment-board {
+    grid-template-columns: 1fr;
+  }
+
+  .student-workspace-layout,
+  .homework-card {
     grid-template-columns: 1fr;
   }
 
@@ -1836,6 +1991,11 @@ tr:last-child td {
   .quick-entry-grid,
   .workspace-grid,
   .student-profile,
+  .student-summary-card,
+  .student-metric-grid,
+  .student-workspace-layout,
+  .homework-card,
+  .student-placeholder-card,
   .assignment-board,
   .analytics-dashboard-grid,
   .form-grid,

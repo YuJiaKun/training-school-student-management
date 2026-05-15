@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { apiGet, apiPost } from '../api.js';
+import { apiDelete, apiGet, apiPost } from '../api.js';
 import StatusBadge from '../components/StatusBadge.jsx';
 import { buildPath } from '../utils/url.js';
 
@@ -60,6 +60,7 @@ export default function HomeworkPage() {
   const [submitStatus, setSubmitStatus] = useState('');
   const [lateStatus, setLateStatus] = useState('');
   const [keyword, setKeyword] = useState('');
+  const [includeArchivedStudents, setIncludeArchivedStudents] = useState(false);
   const [form, setForm] = useState(emptyAssignmentForm);
   const [newClassName, setNewClassName] = useState('');
   const [loadingAssignments, setLoadingAssignments] = useState(false);
@@ -77,8 +78,9 @@ export default function HomeworkPage() {
     assignmentId: selectedAssignmentId,
     submitStatus,
     lateStatus,
-    keyword
-  }), [selectedAssignmentId, submitStatus, lateStatus, keyword]);
+    keyword,
+    includeArchivedStudents: includeArchivedStudents ? 1 : ''
+  }), [selectedAssignmentId, submitStatus, lateStatus, keyword, includeArchivedStudents]);
   const exportCsvUrl = buildPath('/api/export/homework', recordFilters);
   const exportZipUrl = selectedAssignment ? `/api/export/homework/${selectedAssignment.id}.zip` : '';
   const classOptions = useMemo(() => {
@@ -109,7 +111,7 @@ export default function HomeworkPage() {
     setError('');
     try {
       const [assignmentData] = await Promise.all([
-        apiGet('/api/homework-assignments'),
+        apiGet(buildPath('/api/homework-assignments', { includeArchivedStudents: includeArchivedStudents ? 1 : '' })),
         loadClassList()
       ]);
       const items = assignmentData.items || [];
@@ -142,7 +144,7 @@ export default function HomeworkPage() {
 
   useEffect(() => {
     loadAssignments();
-  }, []);
+  }, [includeArchivedStudents]);
 
   useEffect(() => {
     loadRecords();
@@ -212,6 +214,23 @@ export default function HomeworkPage() {
       setError(err.message || '同步待提交名单失败');
     } finally {
       setSyncingRecords(false);
+    }
+  }
+
+  async function handleDeleteAssignment(assignment) {
+    if (!assignment) return;
+    const confirmed = window.confirm(`确认删除「${assignment.homeworkName}」吗？该任务会从作业跟进和大屏隐藏，历史提交记录和文件会保留。`);
+    if (!confirmed) return;
+
+    setError('');
+    setMessage('');
+    try {
+      await apiDelete(`/api/homework-assignments/${assignment.id}`);
+      setSelectedAssignmentId('');
+      setMessage('作业任务已删除，历史提交记录已保留。');
+      await loadAssignments('');
+    } catch (err) {
+      setError(err.message || '删除作业任务失败');
     }
   }
 
@@ -310,23 +329,34 @@ export default function HomeworkPage() {
           {!assignments.length && !loadingAssignments ? <div className="empty-state">暂无作业任务，先发布一个作业。</div> : null}
           <div className="assignment-list">
             {assignments.map((assignment) => (
-              <button
-                className={String(assignment.id) === String(selectedAssignmentId) ? 'assignment-card is-active' : 'assignment-card'}
-                type="button"
+              <article
+                className={String(assignment.id) === String(selectedAssignmentId) ? 'assignment-card-shell is-active' : 'assignment-card-shell'}
                 key={assignment.id}
-                onClick={() => setSelectedAssignmentId(String(assignment.id))}
               >
-                <strong>{assignment.homeworkName}</strong>
-                <span>{assignment.className} / 截止 {assignment.dueDate || '未设置'}</span>
-                <small>
-                  已交 {assignment.submittedCount}/{assignment.totalCount}
-                  <b>{percent(assignment.submittedCount, assignment.totalCount)}</b>
-                </small>
-                <small>
-                  逾期未交 {assignment.overduePendingCount || 0}
-                  <b>迟交 {assignment.lateSubmittedCount || 0}</b>
-                </small>
-              </button>
+                <button
+                  className="assignment-card"
+                  type="button"
+                  onClick={() => setSelectedAssignmentId(String(assignment.id))}
+                >
+                  <strong>{assignment.homeworkName}</strong>
+                  <span>{assignment.className} / 截止 {assignment.dueDate || '未设置'}</span>
+                  <small>
+                    已交 {assignment.submittedCount}/{assignment.totalCount}
+                    <b>{percent(assignment.submittedCount, assignment.totalCount)}</b>
+                  </small>
+                  <small>
+                    逾期未交 {assignment.overduePendingCount || 0}
+                    <b>迟交 {assignment.lateSubmittedCount || 0}</b>
+                  </small>
+                </button>
+                <button
+                  className="button button-secondary danger-button assignment-delete-button"
+                  type="button"
+                  onClick={() => handleDeleteAssignment(assignment)}
+                >
+                  删除任务
+                </button>
+              </article>
             ))}
           </div>
         </div>
@@ -365,6 +395,14 @@ export default function HomeworkPage() {
               <option value="overduePending">只看逾期未交</option>
               <option value="lateSubmitted">只看迟交</option>
             </select>
+            <label className="inline-checkbox">
+              <input
+                type="checkbox"
+                checked={includeArchivedStudents}
+                onChange={(event) => setIncludeArchivedStudents(event.target.checked)}
+              />
+              包含已移出学生
+            </label>
           </div>
 
           <div className="table-summary">{loadingRecords ? '正在加载提交明细...' : `当前筛选 ${records.length} 条记录`}</div>

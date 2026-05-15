@@ -29,7 +29,9 @@ export default function TeacherWorkspace({ user = {} }) {
   const [historyKeyword, setHistoryKeyword] = useState('');
   const [historyFrom, setHistoryFrom] = useState('');
   const [historyTo, setHistoryTo] = useState('');
+  const [historyQueried, setHistoryQueried] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingHistory, setLoadingHistory] = useState(false);
   const [actingId, setActingId] = useState(null);
   const [savingScheduling, setSavingScheduling] = useState(false);
   const [message, setMessage] = useState('');
@@ -56,22 +58,35 @@ export default function TeacherWorkspace({ user = {} }) {
     setLoading(true);
     setError('');
     try {
-      const [allData, requestData, historyData] = await Promise.all([
+      const [allData, requestData] = await Promise.all([
         apiGet(`/api/schedules?teacherId=${encodeURIComponent(teacherId)}`),
-        apiGet(`/api/schedules?teacherId=${encodeURIComponent(teacherId)}&status=requested`),
-        apiGet(buildPath('/api/schedules', historyFilters))
+        apiGet(`/api/schedules?teacherId=${encodeURIComponent(teacherId)}&status=requested`)
       ]);
       const allSchedules = allData.items || [];
-      const historyItems = (historyData.items || []).filter((schedule) =>
-        historyStatus ? true : HISTORY_STATUSES.has(schedule.status)
-      );
       setRequests(sortByStartTime(requestData.items || []));
       setCurrentSchedules(sortByStartTime(allSchedules.filter((schedule) => CURRENT_STATUSES.has(schedule.status))));
-      setHistorySchedules(sortByStartTime(historyItems).reverse());
     } catch (err) {
       setError(err.message || '老师工作台加载失败');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadHistorySchedules() {
+    if (!teacherId) return;
+    setLoadingHistory(true);
+    setError('');
+    try {
+      const historyData = await apiGet(buildPath('/api/schedules', historyFilters));
+      const historyItems = (historyData.items || []).filter((schedule) =>
+        historyStatus ? true : HISTORY_STATUSES.has(schedule.status)
+      );
+      setHistorySchedules(sortByStartTime(historyItems).reverse());
+      setHistoryQueried(true);
+    } catch (err) {
+      setError(err.message || '历史排期查询失败');
+    } finally {
+      setLoadingHistory(false);
     }
   }
 
@@ -81,7 +96,9 @@ export default function TeacherWorkspace({ user = {} }) {
 
   useEffect(() => {
     loadTeacherData();
-  }, [teacherId, historyFilters]);
+    setHistorySchedules([]);
+    setHistoryQueried(false);
+  }, [teacherId]);
 
   async function handleSchedulingToggle(nextValue) {
     setSavingScheduling(true);
@@ -112,6 +129,7 @@ export default function TeacherWorkspace({ user = {} }) {
       await apiPost(`/api/schedules/${schedule.id}/${actionPath}`, body);
       setMessage(action === 'approve' ? '已同意该面试申请。' : '排期状态已更新。');
       await loadTeacherData();
+      if (historyQueried) await loadHistorySchedules();
     } catch (err) {
       setError(err.message || '操作失败，请稍后重试');
     } finally {
@@ -121,6 +139,15 @@ export default function TeacherWorkspace({ user = {} }) {
 
   function clearProcessedNotice() {
     setMessage('已处理的排期不会出现在“我的排期”里，可在历史排期中继续筛选查看。');
+  }
+
+  function clearHistoryFilters() {
+    setHistoryStatus('');
+    setHistoryKeyword('');
+    setHistoryFrom('');
+    setHistoryTo('');
+    setHistorySchedules([]);
+    setHistoryQueried(false);
   }
 
   return (
@@ -202,7 +229,7 @@ export default function TeacherWorkspace({ user = {} }) {
           <section className="panel history-panel">
             <div className="panel-header">
               <h2>历史排期</h2>
-              <span>{historySchedules.length} 条</span>
+              <span>{historyQueried ? `${historySchedules.length} 条` : '待查询'}</span>
             </div>
             <div className="toolbar">
               <select value={historyStatus} onChange={(event) => setHistoryStatus(event.target.value)}>
@@ -215,8 +242,16 @@ export default function TeacherWorkspace({ user = {} }) {
               <input value={historyKeyword} onChange={(event) => setHistoryKeyword(event.target.value)} placeholder="搜索学生、公司、岗位" />
               <input type="date" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} />
               <input type="date" value={historyTo} onChange={(event) => setHistoryTo(event.target.value)} />
+              <button className="button button-primary" type="button" onClick={loadHistorySchedules} disabled={loadingHistory || !teacherId}>
+                {loadingHistory ? '正在查询...' : '查询历史'}
+              </button>
+              <button className="button button-secondary" type="button" onClick={clearHistoryFilters} disabled={loadingHistory}>
+                清空筛选
+              </button>
             </div>
-            {!historySchedules.length ? <div className="empty-state">暂无符合条件的历史排期。</div> : null}
+            {!historyQueried ? <div className="empty-state">设置筛选条件后点击查询历史。</div> : null}
+            {historyQueried && loadingHistory ? <div className="empty-state">正在查询历史排期...</div> : null}
+            {historyQueried && !loadingHistory && !historySchedules.length ? <div className="empty-state">暂无符合条件的历史排期。</div> : null}
             <div className="record-list compact-list">
               {historySchedules.map((schedule) => (
                 <article className="record-item" key={schedule.id}>

@@ -107,6 +107,9 @@ function createAppWithOptions({
       const page = Number(filters.page || 1);
       const pageSize = Number(filters.pageSize || db.students.length || 1);
       const accountDirectory = listAllAuthAccounts(baseAuthAccounts, db);
+      const classNames = Array.isArray(filters.classNames)
+        ? filters.classNames.map((className) => String(className || '').trim()).filter(Boolean)
+        : null;
       const items = db.students.filter((student) => {
         if (filters.status && student.status !== filters.status) return false;
         if (filters.keyword) {
@@ -114,6 +117,7 @@ function createAppWithOptions({
           if (!text.includes(filters.keyword)) return false;
         }
         if (filters.className && student.className !== filters.className) return false;
+        if (classNames && !classNames.includes(student.className || '')) return false;
         if (filters.accountStatus) {
           const hasAccount = Boolean(findStudentAccount(accountDirectory, student.id));
           if (filters.accountStatus === 'generated' && !hasAccount) return false;
@@ -249,6 +253,26 @@ function createAppWithOptions({
       return student;
     },
 
+    removeStudentFromTeacherClass(studentId, session = {}) {
+      const student = db.students.find((item) => Number(item.id) === Number(studentId));
+      if (!student) throw createHttpError('student not found', 404);
+      assertTeacherStudentClassAccess(session, student);
+
+      student.status = 'archived';
+      student.archivedAt = new Date().toISOString();
+
+      const account = listAllAuthAccounts(baseAuthAccounts, db)
+        .find((item) => item.role === 'student' && Number(item.studentId) === Number(student.id));
+      let accountDisabled = false;
+      if (account) {
+        const stored = ensureStoredAccount(baseAuthAccounts, db, account);
+        stored.status = 'disabled';
+        accountDisabled = true;
+      }
+
+      return { student, accountDisabled };
+    },
+
     createHomeworkAssignment(input = {}, session = {}) {
       const homeworkName = String(input.homeworkName || '').trim();
       const className = String(input.className || '').trim();
@@ -268,7 +292,8 @@ function createAppWithOptions({
         description: input.description || '',
         createdAt: input.createdAt || new Date().toISOString(),
         createdByRole: session.role || input.createdByRole || '',
-        createdByName: session.username || input.createdByName || ''
+        createdByName: session.username || input.createdByName || '',
+        deletedAt: ''
       };
       db.homeworkAssignments.push(assignment);
 
@@ -292,14 +317,23 @@ function createAppWithOptions({
       const classScope = resolveClassScope(filters);
       const items = db.homeworkAssignments
         .filter((assignment) => {
+          if (!filters.includeDeletedAssignments && assignment.deletedAt) return false;
           if (!inClassScope(assignment.className, classScope)) return false;
           if (filters.className && assignment.className !== filters.className) return false;
           if (filters.keyword && !assignment.homeworkName.includes(filters.keyword)) return false;
           return true;
         })
-        .map((assignment) => withHomeworkAssignmentStats(db, assignment, filters.now))
+        .map((assignment) => withHomeworkAssignmentStats(db, assignment, filters))
         .sort((left, right) => right.id - left.id);
       return { items, total: items.length };
+    },
+
+    deleteHomeworkAssignment(assignmentId, session = {}) {
+      const assignment = db.homeworkAssignments.find((item) => Number(item.id) === Number(assignmentId));
+      if (!assignment || assignment.deletedAt) throw createHttpError('homework assignment not found', 404);
+      assertHomeworkClassAccess(session, assignment.className);
+      assignment.deletedAt = new Date().toISOString();
+      return { ...assignment };
     },
 
     syncHomeworkAssignmentRecords(assignmentId, session = {}) {
@@ -383,6 +417,11 @@ function createAppWithOptions({
       const now = filters.now || new Date().toISOString();
       const items = db.homeworkRecords.filter((record) => {
         const student = db.students.find((item) => item.id === record.studentId);
+        const assignment = record.assignmentId
+          ? db.homeworkAssignments.find((item) => Number(item.id) === Number(record.assignmentId))
+          : null;
+        if (!filters.includeDeletedAssignments && assignment?.deletedAt) return false;
+        if (!filters.includeArchivedStudents && student?.status !== 'active') return false;
         if (!inClassScope(record.className, classScope)) return false;
         if (filters.studentId && record.studentId !== Number(filters.studentId)) return false;
         if (filters.assignmentId && Number(record.assignmentId) !== Number(filters.assignmentId)) return false;
@@ -714,9 +753,7 @@ function createAppWithOptions({
       return {
         student,
         homeworkRecords: this.listHomeworkRecords({ studentId }).items,
-        interviewRecords: this.listInterviewRecords({ studentId }).items,
-        schedules: this.listInterviewSchedules({ studentId }).items,
-        scheduleGuard: buildStudentScheduleGuard(db, studentId)
+        interviewRecords: this.listInterviewRecords({ studentId }).items
       };
     },
 
@@ -975,6 +1012,7 @@ function createAppWithOptions({
     exportHomeworkAssignmentZip(assignmentId, session = {}) {
       const assignment = db.homeworkAssignments.find((item) => item.id === Number(assignmentId));
       if (!assignment) throw new Error('homework assignment not found');
+      if (assignment.deletedAt) throw createHttpError('homework assignment not found', 404);
       assertHomeworkClassAccess(session, assignment.className);
       const records = this.listHomeworkRecords({ assignmentId }).items;
       const rows = [['作业名称', '班级/课程', '学生姓名', '手机号', '提交状态', '逾期状态', '提交时间', '文件名', '备注']];
@@ -1409,8 +1447,12 @@ function normalizeTeachers(teachers) {
   }));
 }
 
-function withHomeworkAssignmentStats(db, assignment, now = new Date().toISOString()) {
-  const records = db.homeworkRecords.filter((record) => Number(record.assignmentId) === Number(assignment.id));
+function withHomeworkAssignmentStats(db, assignment, options = {}) {
+  const now = typeof options === 'string' ? options : (options.now || new Date().toISOString());
+  const includeArchivedStudents = typeof options === 'object' && options.includeArchivedStudents === true;
+  const records = db.homeworkRecords
+    .filter((record) => Number(record.assignmentId) === Number(assignment.id))
+    .filter((record) => includeArchivedStudents || isHomeworkRecordForActiveStudent(db, record));
   const submittedCount = records.filter((record) => isHomeworkSubmittedStatus(record.submitStatus)).length;
   const overduePendingCount = records.filter((record) => homeworkLateStatus(record, now) === 'overduePending').length;
   const lateSubmittedCount = records.filter((record) => homeworkLateStatus(record, now) === 'lateSubmitted').length;
@@ -1425,6 +1467,11 @@ function withHomeworkAssignmentStats(db, assignment, now = new Date().toISOStrin
   };
 }
 
+function isHomeworkRecordForActiveStudent(db, record) {
+  const student = db.students.find((item) => Number(item.id) === Number(record.studentId));
+  return student?.status === 'active';
+}
+
 function isHomeworkSubmittedStatus(status) {
   return status === 'submitted' || status === 'reviewed';
 }
@@ -1433,6 +1480,16 @@ function assertHomeworkClassAccess(session = {}, className = '') {
   if (session.role !== 'teacher') return;
   const classNames = Array.isArray(session.classNames) ? session.classNames : [];
   if (!classNames.includes(className || '')) {
+    throw createHttpError('forbidden', 403);
+  }
+}
+
+function assertTeacherStudentClassAccess(session = {}, student = {}) {
+  if (session.role !== 'teacher') {
+    throw createHttpError('forbidden', 403);
+  }
+  const classNames = Array.isArray(session.classNames) ? session.classNames : [];
+  if (!classNames.includes(student.className || '')) {
     throw createHttpError('forbidden', 403);
   }
 }
@@ -1458,11 +1515,15 @@ function buildHomeworkAnalytics(db, filters = {}) {
   const activeStudents = db.students.filter((student) => student.status === 'active');
   const students = activeStudents.filter((student) => inClassScope(student.className, classScope));
   const assignments = db.homeworkAssignments
+    .filter((assignment) => !assignment.deletedAt)
     .filter((assignment) => inClassScope(assignment.className, classScope))
     .slice()
     .sort((left, right) => right.id - left.id);
+  const assignmentIds = new Set(assignments.map((assignment) => Number(assignment.id)));
   const records = db.homeworkRecords.filter((record) => {
-    return inClassScope(record.className, classScope);
+    return assignmentIds.has(Number(record.assignmentId)) &&
+      inClassScope(record.className, classScope) &&
+      isHomeworkRecordForActiveStudent(db, record);
   });
   const latestAssignment = assignments[0] || null;
 

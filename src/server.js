@@ -131,13 +131,7 @@ function createServerApp({
 
           if (req.method === 'GET' && url.pathname === '/api/student-workspace/schedules/week') {
             if (!authorize(res, session, ['student'])) return;
-            try {
-              sendJson(res, 200, app.listStudentWeeklySchedules(session, {
-                weekStart: url.searchParams.get('weekStart') || currentWeekStart()
-              }));
-            } catch (error) {
-              sendJson(res, error.statusCode || 400, { error: error.message });
-            }
+            sendJson(res, 403, { error: 'student scheduling is not available' });
             return;
           }
 
@@ -165,8 +159,13 @@ function createServerApp({
           }
 
           if (req.method === 'GET' && url.pathname === '/api/students') {
-            if (!authorize(res, session, ['admin'])) return;
-            sendJson(res, 200, app.listStudents(readStudentFilters(url)));
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            const filters = readScopedStudentFilters(url, session);
+            if (!filters) {
+              sendJson(res, 403, { error: 'forbidden' });
+              return;
+            }
+            sendJson(res, 200, app.listStudents(filters));
             return;
           }
 
@@ -248,6 +247,13 @@ function createServerApp({
             return;
           }
 
+          const teacherRemoveStudentMatch = url.pathname.match(/^\/api\/teacher\/students\/(\d+)\/remove-from-class$/);
+          if (teacherRemoveStudentMatch && req.method === 'POST') {
+            if (!authorize(res, session, ['teacher'])) return;
+            mutate(res, 200, () => app.removeStudentFromTeacherClass(Number(teacherRemoveStudentMatch[1]), session), app);
+            return;
+          }
+
           if (req.method === 'GET' && url.pathname === '/api/homework-assignments') {
             if (!authorize(res, session, ['admin', 'teacher'])) return;
             const filters = readScopedHomeworkAssignmentFilters(url, session);
@@ -262,6 +268,13 @@ function createServerApp({
           if (req.method === 'POST' && url.pathname === '/api/homework-assignments') {
             if (!authorize(res, session, ['admin', 'teacher'])) return;
             await mutateJson(req, res, 201, (body) => app.createHomeworkAssignment(body, session), app, bodyOptions);
+            return;
+          }
+
+          const homeworkAssignmentMatch = url.pathname.match(/^\/api\/homework-assignments\/(\d+)$/);
+          if (homeworkAssignmentMatch && req.method === 'DELETE') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            mutate(res, 200, () => ({ assignment: app.deleteHomeworkAssignment(Number(homeworkAssignmentMatch[1]), session) }), app);
             return;
           }
 
@@ -400,12 +413,12 @@ function createServerApp({
           const scheduleTranscriptMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/transcript$/);
           if (scheduleTranscriptMatch && req.method === 'POST') {
             if (!authorize(res, session, ['student'])) return;
-            await handleInterviewTranscriptSubmission(req, res, app, Number(scheduleTranscriptMatch[1]), session, uploadBodyOptions);
+            sendJson(res, 403, { error: 'student scheduling is not available' });
             return;
           }
 
           if (scheduleTranscriptMatch && req.method === 'GET') {
-            if (!authorize(res, session, ['admin', 'teacher', 'student'])) return;
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
             try {
               const file = app.getInterviewTranscriptFile(Number(scheduleTranscriptMatch[1]), session);
               sendDownload(res, 200, file.body, file.contentType, file.fileName);
@@ -617,38 +630,15 @@ function authorizeScheduleList(res, session, filters) {
     return true;
   }
 
-  if (session.role === 'student') {
-    if (!session.studentId) {
-      sendJson(res, 403, { error: 'student account not bound' });
-      return false;
-    }
-    if (filters.studentId && Number(filters.studentId) !== Number(session.studentId)) {
-      sendJson(res, 403, { error: 'forbidden' });
-      return false;
-    }
-    filters.studentId = String(session.studentId);
-    return true;
-  }
-
   sendJson(res, 403, { error: 'forbidden' });
   return false;
 }
 
 function authorizeScheduleCreate(res, session, body) {
   if (session.role === 'admin') return true;
-  if (session.role !== 'student') {
-    sendJson(res, 403, { error: 'forbidden' });
-    return false;
-  }
-  if (!session.studentId) {
-    sendJson(res, 403, { error: 'student account not bound' });
-    return false;
-  }
-  if (Number(body.studentId) !== Number(session.studentId)) {
-    sendJson(res, 403, { error: 'forbidden' });
-    return false;
-  }
-  return true;
+  void body;
+  sendJson(res, 403, { error: 'forbidden' });
+  return false;
 }
 
 function authorizeScheduleAction(res, session, app, scheduleId, roles) {
@@ -691,10 +681,24 @@ function readStudentFilters(url) {
   };
 }
 
+function readScopedStudentFilters(url, session) {
+  const filters = readStudentFilters(url);
+  if (session.role !== 'teacher') return filters;
+
+  const classNames = Array.isArray(session.classNames) ? session.classNames : [];
+  if (filters.className && !classNames.includes(filters.className)) return null;
+  return {
+    ...filters,
+    status: 'active',
+    classNames
+  };
+}
+
 function readHomeworkAssignmentFilters(url) {
   return {
     className: url.searchParams.get('className') || undefined,
-    keyword: url.searchParams.get('keyword') || undefined
+    keyword: url.searchParams.get('keyword') || undefined,
+    includeArchivedStudents: readBooleanParam(url.searchParams.get('includeArchivedStudents'))
   };
 }
 
@@ -721,8 +725,13 @@ function readHomeworkFilters(url) {
     className: url.searchParams.get('className') || undefined,
     submitStatus: url.searchParams.get('submitStatus') || undefined,
     lateStatus: url.searchParams.get('lateStatus') || undefined,
-    keyword: url.searchParams.get('keyword') || undefined
+    keyword: url.searchParams.get('keyword') || undefined,
+    includeArchivedStudents: readBooleanParam(url.searchParams.get('includeArchivedStudents'))
   };
+}
+
+function readBooleanParam(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').toLowerCase());
 }
 
 function readScopedHomeworkFilters(url, session) {

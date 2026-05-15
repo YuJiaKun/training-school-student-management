@@ -10,6 +10,7 @@ const InterviewsPage = lazy(() => import('../pages/InterviewsPage.jsx'));
 const SchedulesPage = lazy(() => import('../pages/SchedulesPage.jsx'));
 const StudentWorkspace = lazy(() => import('../pages/StudentWorkspace.jsx'));
 const StudentsPage = lazy(() => import('../pages/StudentsPage.jsx'));
+const TeacherStudentsPage = lazy(() => import('../pages/TeacherStudentsPage.jsx'));
 const TeacherWorkspace = lazy(() => import('../pages/TeacherWorkspace.jsx'));
 
 export const ROLE_TEXT = {
@@ -22,10 +23,11 @@ const NAV_ITEMS = [
   { key: 'dashboard', label: '工作台', roles: ['admin', 'teacher', 'student'] },
   { key: 'students', label: '学生管理', roles: ['admin'] },
   { key: 'accounts', label: '账号管理', roles: ['admin'] },
+  { key: 'teacher-students', label: '班级学生', roles: ['teacher'] },
   { key: 'homework', label: '作业跟进', roles: ['teacher'] },
   { key: 'homework-analytics', label: '作业大屏', roles: ['teacher'] },
   { key: 'interviews', label: '面试记录', roles: ['admin'] },
-  { key: 'schedules', label: '排期总览', roles: ['admin', 'teacher', 'student'] },
+  { key: 'schedules', label: '排期总览', roles: ['admin', 'teacher'] },
   { key: 'schedule-queue', label: '排期审批', roles: ['admin'] }
 ];
 
@@ -90,6 +92,7 @@ export default function AppShell({ user, onLogout }) {
 function RouteView({ route, user }) {
   if (route === 'students') return <StudentsPage />;
   if (route === 'accounts') return <AccountsPage />;
+  if (route === 'teacher-students') return <TeacherStudentsPage />;
   if (route === 'homework') return <HomeworkPage />;
   if (route === 'homework-analytics') return <HomeworkAnalyticsPage />;
   if (route === 'interviews') return <InterviewsPage />;

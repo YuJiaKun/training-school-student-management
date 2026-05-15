@@ -148,7 +148,8 @@ function normalizeHomeworkAssignments(assignments) {
     description: assignment.description || '',
     createdAt: assignment.createdAt || '',
     createdByRole: assignment.createdByRole || '',
-    createdByName: assignment.createdByName || ''
+    createdByName: assignment.createdByName || '',
+    deletedAt: assignment.deletedAt || ''
   })).filter((assignment) => Number.isInteger(assignment.id) && assignment.id > 0);
 }
 
