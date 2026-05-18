@@ -25,6 +25,7 @@ export default function InterviewsPage() {
 
   const filters = useMemo(() => ({ result }), [result]);
   const exportUrl = buildPath('/api/export/interviews', filters);
+  const exportZipUrl = buildPath('/api/export/interviews.zip', filters);
   const studentNameById = useMemo(() => {
     return new Map(students.map((student) => [Number(student.id), student.name]));
   }, [students]);
@@ -108,7 +109,10 @@ export default function InterviewsPage() {
           <h1>面试记录</h1>
           <p className="page-description">沉淀公司、岗位、反馈和入职结果，形成可追踪的就业过程数据。</p>
         </div>
-        <a className="button button-secondary" href={exportUrl}>导出 CSV</a>
+        <div className="form-actions">
+          <a className="button button-secondary" href={exportUrl}>导出 CSV</a>
+          <a className="button button-primary" href={exportZipUrl}>批量导出 TXT</a>
+        </div>
       </div>
 
       <div className="toolbar">
@@ -158,9 +162,12 @@ export default function InterviewsPage() {
               <th>公司</th>
               <th>岗位</th>
               <th>学生</th>
+              <th>老师</th>
               <th>面试时间</th>
               <th>结果</th>
               <th>入职状态</th>
+              <th>记录文件</th>
+              <th>来源</th>
               <th>操作</th>
             </tr>
           </thead>
@@ -170,9 +177,20 @@ export default function InterviewsPage() {
                 <td>{record.companyName || '-'}</td>
                 <td>{record.positionName || '-'}</td>
                 <td>{studentNameById.get(Number(record.studentId)) || `#${record.studentId}`}</td>
+                <td>{record.teacherName || '-'}</td>
                 <td>{record.interviewAt ? record.interviewAt.replace('T', ' ').slice(0, 16) : '-'}</td>
                 <td><StatusBadge status={record.result} /></td>
                 <td><StatusBadge status={record.hiredStatus} /></td>
+                <td>
+                  {record.transcriptFileName ? (
+                    <div className="table-stack">
+                      <a href={`/api/interviews/${record.id}/transcript`}>下载记录</a>
+                      <span>{record.transcriptFileName}</span>
+                      {record.transcriptUploadedAt ? <small>{record.transcriptUploadedAt.replace('T', ' ').slice(0, 16)}</small> : null}
+                    </div>
+                  ) : '-'}
+                </td>
+                <td>{record.sourceText || (record.scheduleId ? '排期同步' : '手动录入')}</td>
                 <td className="table-actions">
                   <button type="button" onClick={() => startEdit(record)}>编辑</button>
                   <button type="button" onClick={() => updateRecord(record, { result: 'passed' })}>通过</button>
@@ -183,7 +201,7 @@ export default function InterviewsPage() {
             ))}
             {!records.length && !loading ? (
               <tr>
-                <td colSpan="7" className="empty-cell">暂无面试记录</td>
+                <td colSpan="10" className="empty-cell">暂无面试记录</td>
               </tr>
             ) : null}
           </tbody>

@@ -1,4 +1,6 @@
 .claude/
+.playwright-cli/
 node_modules/
 client/dist/
 data/
+deploy/*.tar.gz

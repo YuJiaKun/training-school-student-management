@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiGet, apiPatch, apiPost } from '../api.js';
+import InterviewScheduleCalendar, { scheduleToCalendarEvent } from '../components/InterviewScheduleCalendar.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
 import { buildPath } from '../utils/url.js';
 
@@ -30,6 +31,7 @@ export default function TeacherWorkspace({ user = {} }) {
   const [historyFrom, setHistoryFrom] = useState('');
   const [historyTo, setHistoryTo] = useState('');
   const [historyQueried, setHistoryQueried] = useState(false);
+  const [selectedSchedule, setSelectedSchedule] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [actingId, setActingId] = useState(null);
@@ -44,6 +46,10 @@ export default function TeacherWorkspace({ user = {} }) {
     from: historyFrom ? `${historyFrom}T00:00:00` : '',
     to: historyTo ? `${historyTo}T23:59:59` : ''
   }), [historyFrom, historyKeyword, historyStatus, teacherId]);
+
+  const calendarEvents = useMemo(() => {
+    return [...requests, ...currentSchedules].map((schedule) => scheduleToCalendarEvent(schedule));
+  }, [currentSchedules, requests]);
 
   async function loadTeacherData() {
     if (!teacherId) {
@@ -65,6 +71,10 @@ export default function TeacherWorkspace({ user = {} }) {
       const allSchedules = allData.items || [];
       setRequests(sortByStartTime(requestData.items || []));
       setCurrentSchedules(sortByStartTime(allSchedules.filter((schedule) => CURRENT_STATUSES.has(schedule.status))));
+      setSelectedSchedule((current) => {
+        if (!current) return null;
+        return [...(requestData.items || []), ...allSchedules].find((schedule) => schedule.id === current.id) || null;
+      });
     } catch (err) {
       setError(err.message || '老师工作台加载失败');
     } finally {
@@ -128,6 +138,7 @@ export default function TeacherWorkspace({ user = {} }) {
         : {};
       await apiPost(`/api/schedules/${schedule.id}/${actionPath}`, body);
       setMessage(action === 'approve' ? '已同意该面试申请。' : '排期状态已更新。');
+      setSelectedSchedule(null);
       await loadTeacherData();
       if (historyQueried) await loadHistorySchedules();
     } catch (err) {
@@ -175,6 +186,35 @@ export default function TeacherWorkspace({ user = {} }) {
 
       {!loading ? (
         <>
+          <section className="panel schedule-calendar-panel teacher-calendar-panel">
+            <div className="panel-header">
+              <div>
+                <h2>我的排期日历</h2>
+                <p className="muted">点击待接收申请可在下方快速同意或拒绝；完成和取消后会自动移出当前日历。</p>
+              </div>
+              <span>{calendarEvents.length} 条</span>
+            </div>
+            <InterviewScheduleCalendar
+              events={calendarEvents}
+              onEventClick={(info) => setSelectedSchedule(info.event.extendedProps.schedule)}
+            />
+            {selectedSchedule ? (
+              <div className="schedule-selected-actions">
+                <div>
+                  <strong>{formatScheduleTitle(selectedSchedule)}</strong>
+                  <p className="muted">{selectedSchedule.positionName || '未填写岗位'} · {formatDateTime(selectedSchedule.startsAt)} 至 {formatDateTime(selectedSchedule.endsAt)}</p>
+                </div>
+                <StatusBadge status={selectedSchedule.status} />
+                {selectedSchedule.status === 'requested' ? (
+                  <div className="actions">
+                    <button className="button button-primary" type="button" disabled={actingId === selectedSchedule.id} onClick={() => handleAction(selectedSchedule, 'approve')}>同意</button>
+                    <button className="button button-secondary" type="button" disabled={actingId === selectedSchedule.id} onClick={() => handleAction(selectedSchedule, 'reject')}>拒绝</button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+
           <div className="workspace-grid">
             <section className="panel">
               <div className="panel-header">

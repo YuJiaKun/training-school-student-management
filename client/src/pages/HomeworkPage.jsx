@@ -207,11 +207,11 @@ export default function HomeworkPage() {
     setMessage('');
     try {
       const result = await apiPost(`/api/homework-assignments/${selectedAssignment.id}/sync-records`, {});
-      setMessage(result.createdCount ? `已补发 ${result.createdCount} 条待提交记录` : '名单已是最新，无需补发');
+      setMessage(result.createdCount ? `已给新加入学生补发 ${result.createdCount} 条待提交记录` : '当前班级没有需要补发的新学生');
       await loadAssignments(selectedAssignment.id);
       await loadRecords();
     } catch (err) {
-      setError(err.message || '同步待提交名单失败');
+      setError(err.message || '补发给新加入学生失败');
     } finally {
       setSyncingRecords(false);
     }
@@ -374,11 +374,12 @@ export default function HomeworkPage() {
             {selectedAssignment ? (
               <div className="form-actions">
                 <button className="button button-secondary" type="button" onClick={handleSyncRecords} disabled={syncingRecords}>
-                  {syncingRecords ? '正在同步...' : '同步待提交名单'}
+                  {syncingRecords ? '正在补发...' : '补发给新加入学生'}
                 </button>
                 <button className="button button-secondary" type="button" onClick={handleCopyMissingStudents}>
                   复制缺交名单
                 </button>
+                <span className="muted">只补发当前班级新增在读学生，不重复生成已有记录。</span>
               </div>
             ) : null}
           </div>

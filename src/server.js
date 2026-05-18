@@ -113,6 +113,13 @@ function createServerApp({
             return;
           }
 
+          const classMatch = url.pathname.match(/^\/api\/classes\/(\d+)$/);
+          if (classMatch && req.method === 'DELETE') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            mutate(res, 200, () => ({ class: app.deleteClass(Number(classMatch[1]), session) }), app);
+            return;
+          }
+
           if (req.method === 'GET' && url.pathname === '/api/student-workspace') {
             if (!authorize(res, session, ['student'])) return;
             try {
@@ -131,7 +138,10 @@ function createServerApp({
 
           if (req.method === 'GET' && url.pathname === '/api/student-workspace/schedules/week') {
             if (!authorize(res, session, ['student'])) return;
-            sendJson(res, 403, { error: 'student scheduling is not available' });
+            sendJson(res, 200, app.listStudentWeeklySchedules(session, {
+              weekStart: url.searchParams.get('weekStart') || currentWeekStart(),
+              teacherId: url.searchParams.get('teacherId') || ''
+            }));
             return;
           }
 
@@ -193,6 +203,18 @@ function createServerApp({
             return;
           }
 
+          if (req.method === 'POST' && url.pathname === '/api/teacher/students/accounts/reset') {
+            if (!authorize(res, session, ['teacher'])) return;
+            await mutateJson(req, res, 200, (body) => app.resetTeacherStudentAccountPasswords(body, session), app, bodyOptions);
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/students/bulk-learning-stage') {
+            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            await mutateJson(req, res, 200, (body) => app.bulkUpdateStudentLearningStage(body, session), app, bodyOptions);
+            return;
+          }
+
           if (req.method === 'GET' && url.pathname === '/api/admin/teacher-accounts') {
             if (!authorize(res, session, ['admin'])) return;
             sendJson(res, 200, app.listTeacherAccounts());
@@ -251,6 +273,13 @@ function createServerApp({
           if (teacherRemoveStudentMatch && req.method === 'POST') {
             if (!authorize(res, session, ['teacher'])) return;
             mutate(res, 200, () => app.removeStudentFromTeacherClass(Number(teacherRemoveStudentMatch[1]), session), app);
+            return;
+          }
+
+          const teacherStudentMatch = url.pathname.match(/^\/api\/teacher\/students\/(\d+)$/);
+          if (teacherStudentMatch && req.method === 'PATCH') {
+            if (!authorize(res, session, ['teacher'])) return;
+            await mutateJson(req, res, 200, (body) => ({ student: app.updateTeacherStudent(Number(teacherStudentMatch[1]), body, session) }), app, bodyOptions);
             return;
           }
 
@@ -347,6 +376,18 @@ function createServerApp({
             return;
           }
 
+          const interviewTranscriptMatch = url.pathname.match(/^\/api\/interviews\/(\d+)\/transcript$/);
+          if (interviewTranscriptMatch && req.method === 'GET') {
+            if (!authorize(res, session, ['admin'])) return;
+            try {
+              const file = app.getInterviewRecordTranscriptFile(Number(interviewTranscriptMatch[1]));
+              sendDownload(res, 200, file.body, file.contentType, file.fileName);
+            } catch (error) {
+              sendJson(res, error.statusCode || 400, { error: error.message });
+            }
+            return;
+          }
+
           if (req.method === 'GET' && url.pathname === '/api/schedules/timeline') {
             if (!authorize(res, session, ['admin', 'teacher'])) return;
             const filters = { weekStart: url.searchParams.get('weekStart') || currentWeekStart() };
@@ -368,7 +409,7 @@ function createServerApp({
             mutate(res, 201, () => ({
               schedule: session.role === 'admin'
                 ? app.createAdminInterviewSchedule(body, { username: session.username })
-                : app.requestInterviewSchedule(body)
+                : app.requestInterviewSchedule({ ...body, studentId: session.studentId })
             }), app);
             return;
           }
@@ -398,8 +439,12 @@ function createServerApp({
 
           const scheduleCancelMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/cancel$/);
           if (scheduleCancelMatch && req.method === 'POST') {
-            if (!authorizeScheduleAction(res, session, app, Number(scheduleCancelMatch[1]), ['admin', 'teacher'])) return;
-            mutate(res, 200, () => ({ schedule: app.cancelInterviewSchedule(Number(scheduleCancelMatch[1])) }), app);
+            if (!authorizeScheduleAction(res, session, app, Number(scheduleCancelMatch[1]), ['admin', 'teacher', 'student'])) return;
+            mutate(res, 200, () => ({
+              schedule: session.role === 'student'
+                ? app.cancelStudentInterviewSchedule(Number(scheduleCancelMatch[1]), session)
+                : app.cancelInterviewSchedule(Number(scheduleCancelMatch[1]))
+            }), app);
             return;
           }
 
@@ -413,12 +458,12 @@ function createServerApp({
           const scheduleTranscriptMatch = url.pathname.match(/^\/api\/schedules\/(\d+)\/transcript$/);
           if (scheduleTranscriptMatch && req.method === 'POST') {
             if (!authorize(res, session, ['student'])) return;
-            sendJson(res, 403, { error: 'student scheduling is not available' });
+            await handleInterviewTranscriptSubmission(req, res, app, Number(scheduleTranscriptMatch[1]), session, uploadBodyOptions);
             return;
           }
 
           if (scheduleTranscriptMatch && req.method === 'GET') {
-            if (!authorize(res, session, ['admin', 'teacher'])) return;
+            if (!authorize(res, session, ['admin', 'teacher', 'student'])) return;
             try {
               const file = app.getInterviewTranscriptFile(Number(scheduleTranscriptMatch[1]), session);
               sendDownload(res, 200, file.body, file.contentType, file.fileName);
@@ -490,6 +535,13 @@ function createServerApp({
           if (req.method === 'GET' && url.pathname === '/api/export/interviews') {
             if (!authorize(res, session, ['admin'])) return;
             sendText(res, 200, app.exportInterviewRecords(readInterviewFilters(url)), 'text/csv; charset=utf-8');
+            return;
+          }
+
+          if (req.method === 'GET' && url.pathname === '/api/export/interviews.zip') {
+            if (!authorize(res, session, ['admin'])) return;
+            const zip = app.exportInterviewTranscriptsZip(readInterviewFilters(url));
+            sendDownload(res, 200, zip.body, zip.contentType, zip.fileName);
             return;
           }
 
@@ -636,6 +688,10 @@ function authorizeScheduleList(res, session, filters) {
 
 function authorizeScheduleCreate(res, session, body) {
   if (session.role === 'admin') return true;
+  if (session.role === 'student' && session.studentId) {
+    void body;
+    return true;
+  }
   void body;
   sendJson(res, 403, { error: 'forbidden' });
   return false;
@@ -643,15 +699,31 @@ function authorizeScheduleCreate(res, session, body) {
 
 function authorizeScheduleAction(res, session, app, scheduleId, roles) {
   if (!authorize(res, session, roles)) return false;
-  if (session.role !== 'teacher') return true;
+  if (session.role === 'admin') return true;
 
   const schedule = app.listInterviewSchedules().items.find((item) => item.id === scheduleId);
-  if (!schedule || Number(schedule.teacherId) !== Number(session.teacherId)) {
+  if (session.role === 'teacher') {
+    if (!schedule || Number(schedule.teacherId) !== Number(session.teacherId)) {
+      sendJson(res, 403, { error: 'forbidden' });
+      return false;
+    }
+    return true;
+  }
+
+  if (session.role === 'student') {
+    if (!schedule || Number(schedule.studentId) !== Number(session.studentId) || schedule.status !== 'requested') {
+      sendJson(res, 403, { error: 'forbidden' });
+      return false;
+    }
+    return true;
+  }
+
+  if (!schedule) {
     sendJson(res, 403, { error: 'forbidden' });
     return false;
   }
 
-  return true;
+  return false;
 }
 
 function persist(app) {
@@ -673,6 +745,7 @@ function errorPayload(error) {
 function readStudentFilters(url) {
   return {
     status: url.searchParams.get('status') || undefined,
+    learningStage: url.searchParams.get('learningStage') || undefined,
     accountStatus: url.searchParams.get('accountStatus') || undefined,
     keyword: url.searchParams.get('keyword') || undefined,
     className: url.searchParams.get('className') || undefined,
@@ -750,7 +823,8 @@ function readInterviewFilters(url) {
   return {
     studentId: url.searchParams.get('studentId') || undefined,
     companyName: url.searchParams.get('companyName') || undefined,
-    result: url.searchParams.get('result') || undefined
+    result: url.searchParams.get('result') || undefined,
+    source: url.searchParams.get('source') || undefined
   };
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiDelete, apiGet, apiPatch, apiPost } from '../api.js';
-import StatusBadge from '../components/StatusBadge.jsx';
+import StatusBadge, { statusText } from '../components/StatusBadge.jsx';
 import { buildPath } from '../utils/url.js';
 
 const emptyForm = {
@@ -9,9 +9,16 @@ const emptyForm = {
   gender: '',
   birthday: '',
   className: '',
+  learningStage: 'studying',
   enrolledAt: '',
   remark: ''
 };
+
+const LEARNING_STAGE_OPTIONS = [
+  { value: 'studying', label: '学习中' },
+  { value: 'job_seeking', label: '求职中' },
+  { value: 'employed', label: '已就业' }
+];
 
 function downloadRecentAccounts(accounts) {
   const rows = [
@@ -83,6 +90,7 @@ export default function StudentsPage() {
   const [total, setTotal] = useState(0);
   const [keyword, setKeyword] = useState('');
   const [status, setStatus] = useState('');
+  const [learningStage, setLearningStage] = useState('');
   const [accountStatus, setAccountStatus] = useState('');
   const [className, setClassName] = useState('');
   const [hasSearched, setHasSearched] = useState(false);
@@ -99,11 +107,19 @@ export default function StudentsPage() {
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [creatingClass, setCreatingClass] = useState(false);
+  const [deleteClassId, setDeleteClassId] = useState('');
+  const [deletingClass, setDeletingClass] = useState(false);
   const [generatingAccounts, setGeneratingAccounts] = useState(false);
+  const [bulkClassName, setBulkClassName] = useState('');
+  const [bulkLearningStage, setBulkLearningStage] = useState('job_seeking');
+  const [bulkUpdatingStage, setBulkUpdatingStage] = useState(false);
   const [resettingAccountId, setResettingAccountId] = useState(null);
   const [error, setError] = useState('');
 
-  const filters = useMemo(() => ({ keyword, status, accountStatus, className }), [accountStatus, className, keyword, status]);
+  const filters = useMemo(
+    () => ({ keyword, status, learningStage, accountStatus, className }),
+    [accountStatus, className, keyword, learningStage, status]
+  );
   const exportUrl = buildPath('/api/export/students', filters);
   const accountExportUrl = buildPath('/api/export/student-accounts', filters);
   const classOptions = useMemo(() => {
@@ -122,6 +138,7 @@ export default function StudentsPage() {
     return options;
   }, [classes, form.className]);
   const classSummary = useMemo(() => summarizeClasses(classes), [classes]);
+  const deletableClassOptions = useMemo(() => classes.filter((item) => item.id !== undefined && item.id !== null), [classes]);
 
   async function loadStudents() {
     setLoading(true);
@@ -154,7 +171,7 @@ export default function StudentsPage() {
   }, []);
 
   function hasSearchCondition() {
-    return Boolean(keyword.trim() || status || accountStatus || className);
+    return Boolean(keyword.trim() || status || learningStage || accountStatus || className);
   }
 
   async function handleSearch() {
@@ -172,6 +189,7 @@ export default function StudentsPage() {
   function resetSearch() {
     setKeyword('');
     setStatus('');
+    setLearningStage('');
     setAccountStatus('');
     setClassName('');
     setHasSearched(false);
@@ -197,6 +215,7 @@ export default function StudentsPage() {
       gender: student.gender || '',
       birthday: student.birthday || '',
       className: student.className || '',
+      learningStage: student.learningStage || 'studying',
       enrolledAt: student.enrolledAt || '',
       remark: student.remark || ''
     });
@@ -217,6 +236,7 @@ export default function StudentsPage() {
         phone: form.phone.trim(),
         gender: form.gender.trim(),
         className: form.className.trim(),
+        learningStage: form.learningStage || 'studying',
         remark: form.remark.trim()
       };
       if (editingId) {
@@ -252,6 +272,59 @@ export default function StudentsPage() {
       setError(err.message || '新增班级/课程失败');
     } finally {
       setCreatingClass(false);
+    }
+  }
+
+  async function handleBulkLearningStage() {
+    if (!bulkClassName) {
+      setError('请先选择要批量修改的班级/课程');
+      return;
+    }
+
+    setBulkUpdatingStage(true);
+    setError('');
+    setImportMessage('');
+    try {
+      const result = await apiPost('/api/students/bulk-learning-stage', {
+        className: bulkClassName,
+        learningStage: bulkLearningStage
+      });
+      setImportMessage(`已将「${bulkClassName}」的 ${result.updatedCount || 0} 名在读学生切换为${statusText(bulkLearningStage)}。`);
+      await refreshStudentsIfNeeded();
+    } catch (err) {
+      setError(err.message || '批量修改学习阶段失败');
+    } finally {
+      setBulkUpdatingStage(false);
+    }
+  }
+
+  async function handleDeleteClass() {
+    const classItem = deletableClassOptions.find((item) => String(item.id) === String(deleteClassId));
+    if (!classItem) {
+      setError('请先选择要删除的空班级');
+      return;
+    }
+
+    const confirmed = window.confirm(`确认删除空班级「${classItem.className}」吗？仅删除班级枚举，不删除学生、作业、面试或排期历史记录。`);
+    if (!confirmed) return;
+
+    setDeletingClass(true);
+    setError('');
+    setImportMessage('');
+    try {
+      await apiDelete(`/api/classes/${classItem.id}`);
+      setImportMessage(`已删除空班级：${classItem.className}`);
+      setDeleteClassId('');
+      if (className === classItem.className) setClassName('');
+      if (bulkClassName === classItem.className) setBulkClassName('');
+      if (importDefaultClassName === classItem.className) setImportDefaultClassName('');
+      if (form.className === classItem.className) setForm((current) => ({ ...current, className: '' }));
+      await loadClasses();
+      await refreshStudentsIfNeeded();
+    } catch (err) {
+      setError(err.message || '删除班级失败');
+    } finally {
+      setDeletingClass(false);
     }
   }
 
@@ -407,9 +480,15 @@ export default function StudentsPage() {
           ))}
         </select>
         <select value={status} onChange={(event) => setStatus(event.target.value)}>
-          <option value="">全部状态</option>
+          <option value="">全部档案状态</option>
           <option value="active">在读</option>
           <option value="archived">已归档</option>
+        </select>
+        <select value={learningStage} onChange={(event) => setLearningStage(event.target.value)}>
+          <option value="">全部学习阶段</option>
+          {LEARNING_STAGE_OPTIONS.map((option) => (
+            <option value={option.value} key={option.value}>{option.label}</option>
+          ))}
         </select>
         <select value={accountStatus} onChange={(event) => setAccountStatus(event.target.value)}>
           <option value="">全部账号</option>
@@ -427,6 +506,52 @@ export default function StudentsPage() {
 
       {error ? <div className="alert alert-error">{error}</div> : null}
       {importMessage ? <div className="alert alert-success">{importMessage}</div> : null}
+
+      <section className="panel form-grid">
+        <h2>整班学习阶段</h2>
+        <p className="form-hint form-wide">只会修改该班级当前在读学生，不影响已归档学生和历史记录。</p>
+        <label>
+          班级/课程
+          <select value={bulkClassName} onChange={(event) => setBulkClassName(event.target.value)}>
+            <option value="">请选择班级/课程</option>
+            {classOptions.map((item) => (
+              <option key={`bulk-${item.className}`} value={item.className}>{classOptionLabel(item)}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          目标学习阶段
+          <select value={bulkLearningStage} onChange={(event) => setBulkLearningStage(event.target.value)}>
+            {LEARNING_STAGE_OPTIONS.map((option) => (
+              <option value={option.value} key={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+        <div className="form-actions">
+          <button className="button button-secondary" type="button" onClick={handleBulkLearningStage} disabled={bulkUpdatingStage || !bulkClassName}>
+            {bulkUpdatingStage ? '正在修改...' : '批量修改学习阶段'}
+          </button>
+        </div>
+      </section>
+
+      <section className="panel form-grid">
+        <h2>班级维护</h2>
+        <p className="form-hint form-wide">只允许删除没有在读学生、也没有未删除作业任务的空班级；历史数据不会被物理删除。</p>
+        <label>
+          删除空班级
+          <select value={deleteClassId} onChange={(event) => setDeleteClassId(event.target.value)}>
+            <option value="">请选择空班级</option>
+            {deletableClassOptions.map((item) => (
+              <option key={`delete-${item.id}`} value={item.id}>{classOptionLabel(item)}</option>
+            ))}
+          </select>
+        </label>
+        <div className="form-actions">
+          <button className="danger-button" type="button" onClick={handleDeleteClass} disabled={deletingClass || !deleteClassId}>
+            {deletingClass ? '正在删除...' : '删除空班级'}
+          </button>
+        </div>
+      </section>
 
       <form className="panel form-grid" onSubmit={previewImport}>
         <h2>批量导入学生</h2>
@@ -552,6 +677,14 @@ export default function StudentsPage() {
           手机号
           <input value={form.phone} onChange={(event) => updateForm('phone', event.target.value)} placeholder="学生后续补全，可选" />
         </label>
+        <label>
+          学习阶段
+          <select value={form.learningStage} onChange={(event) => updateForm('learningStage', event.target.value)}>
+            {LEARNING_STAGE_OPTIONS.map((option) => (
+              <option value={option.value} key={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
         <div className="inline-create form-wide">
           <label>
             新增班级/课程
@@ -601,7 +734,7 @@ export default function StudentsPage() {
       </form>
 
       <div className="table-summary">
-        {!hasSearched ? '默认不展示全部学生，请输入姓名/手机号、选择班级或账号状态后搜索。' : (loading ? '正在加载学生...' : `共 ${total} 名学生`)}
+        {!hasSearched ? '默认不展示全部学生，请输入姓名/手机号，或选择班级、档案状态、学习阶段、账号状态后搜索。' : (loading ? '正在加载学生...' : `共 ${total} 名学生`)}
       </div>
       <div className="table-wrap">
         <table>
@@ -611,7 +744,8 @@ export default function StudentsPage() {
               <th>手机号</th>
               <th>班级/课程</th>
               <th>入学时间</th>
-              <th>状态</th>
+              <th>档案状态</th>
+              <th>学习阶段</th>
               <th>账号</th>
               <th>备注</th>
               <th>操作</th>
@@ -625,6 +759,7 @@ export default function StudentsPage() {
                 <td>{student.className || '-'}</td>
                 <td>{student.enrolledAt || '-'}</td>
                 <td><StatusBadge status={student.status} /></td>
+                <td><StatusBadge status={student.learningStage || 'studying'} /></td>
                 <td>
                   <span className={student.hasAccount ? 'status-badge status-success' : 'status-badge status-muted'}>
                     {student.hasAccount ? '已生成' : '未生成'}
@@ -650,7 +785,7 @@ export default function StudentsPage() {
             ))}
             {!students.length && !loading ? (
               <tr>
-                <td colSpan="8" className="empty-cell">
+                <td colSpan="9" className="empty-cell">
                   {hasSearched ? '暂无符合条件的学生' : '请先搜索，再展示学生列表'}
                 </td>
               </tr>

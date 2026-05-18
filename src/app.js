@@ -14,6 +14,7 @@ const DEFAULT_AUTH_ACCOUNTS = [
 const DEFAULT_TEACHERS = [{ id: 1, name: '张老师' }];
 const VALID_ROLES = new Set(['admin', 'teacher', 'student']);
 const VALID_STUDENT_STATUSES = new Set(['active', 'archived']);
+const VALID_STUDENT_LEARNING_STAGES = new Set(['studying', 'job_seeking', 'employed']);
 const VALID_HOMEWORK_SUBMIT_STATUSES = new Set(['pending', 'submitted', 'reviewed']);
 const ALLOWED_HOMEWORK_FILE_EXTENSIONS = new Set(['.txt']);
 const ALLOWED_TRANSCRIPT_FILE_EXTENSIONS = new Set(['.txt']);
@@ -25,6 +26,8 @@ const VALID_SCHEDULE_STATUSES = new Set(['requested', 'scheduled', 'confirmed', 
 const TERMINAL_SCHEDULE_STATUSES = new Set(['completed', 'cancelled']);
 const UNFINISHED_SCHEDULE_STATUSES = new Set(['requested', 'scheduled', 'confirmed', 'rescheduled']);
 const MAX_UNFINISHED_STUDENT_SCHEDULES = 3;
+const STUDENT_SCHEDULE_SLOT_MINUTES = 30;
+const STUDENT_SCHEDULE_MAX_DURATION_MINUTES = 120;
 const MAX_LOGIN_FAILURES = 5;
 const LOGIN_LOCK_MS = 5 * 60 * 1000;
 
@@ -67,6 +70,7 @@ function createAppWithOptions({
       }
       assertUniqueStudentPhone(db, phone);
       ensureClassOption(db, className);
+      const learningStage = normalizeStudentLearningStage(input.learningStage);
 
       const student = {
         id: db.nextStudentId++,
@@ -74,9 +78,11 @@ function createAppWithOptions({
         phone,
         gender: input.gender || '',
         birthday: input.birthday || '',
+        graduationDate: input.graduationDate || '',
         className,
         enrolledAt: input.enrolledAt || '',
         status: 'active',
+        learningStage,
         archivedAt: null,
         remark: input.remark || ''
       };
@@ -93,12 +99,17 @@ function createAppWithOptions({
       if (!name || !className) throw new Error('student name and class are required');
       assertUniqueStudentPhone(db, phone, id);
       ensureClassOption(db, className);
+      const learningStage = patch.learningStage === undefined
+        ? normalizeStudentLearningStage(student.learningStage)
+        : normalizeStudentLearningStage(patch.learningStage);
       student.name = name;
       student.phone = phone;
       student.gender = patch.gender ?? student.gender;
       student.birthday = patch.birthday ?? student.birthday;
+      student.graduationDate = patch.graduationDate ?? student.graduationDate ?? '';
       student.className = className;
       student.enrolledAt = patch.enrolledAt ?? student.enrolledAt;
+      student.learningStage = learningStage;
       student.remark = patch.remark ?? student.remark;
       return student;
     },
@@ -112,6 +123,7 @@ function createAppWithOptions({
         : null;
       const items = db.students.filter((student) => {
         if (filters.status && student.status !== filters.status) return false;
+        if (filters.learningStage && normalizeStudentLearningStage(student.learningStage) !== filters.learningStage) return false;
         if (filters.keyword) {
           const text = `${student.name} ${student.phone}`;
           if (!text.includes(filters.keyword)) return false;
@@ -231,6 +243,33 @@ function createAppWithOptions({
       return { accounts, skipped, skippedCount: skipped.length };
     },
 
+    resetTeacherStudentAccountPasswords(input = {}, session = {}) {
+      if (session.role !== 'teacher') throw createHttpError('forbidden', 403);
+      const allowedClassNames = Array.isArray(session.classNames) ? session.classNames : [];
+      const className = String(input.className || '').trim();
+      if (className) assertTeacherTargetClassAccess(session, className);
+
+      const requestedIds = Array.isArray(input.studentIds)
+        ? new Set(input.studentIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))
+        : null;
+      const allowedSet = new Set(className ? [className] : allowedClassNames);
+      const students = db.students.filter((student) => {
+        if (student.status !== 'active') return false;
+        if (!allowedSet.has(student.className || '')) return false;
+        if (requestedIds && !requestedIds.has(Number(student.id))) return false;
+        return true;
+      });
+
+      if (requestedIds) {
+        const resolvedIds = new Set(students.map((student) => Number(student.id)));
+        for (const id of requestedIds) {
+          if (!resolvedIds.has(id)) throw createHttpError('forbidden', 403);
+        }
+      }
+
+      return this.resetStudentAccountPasswords({ studentIds: students.map((student) => student.id) });
+    },
+
     updateStudentProfile(session = {}, patch = {}) {
       if (!session.studentId) throw createHttpError('student account not bound', 403);
       const student = db.students.find((item) => Number(item.id) === Number(session.studentId));
@@ -239,7 +278,7 @@ function createAppWithOptions({
       assertUniqueStudentPhone(db, phone, student.id);
       student.phone = phone;
       student.gender = patch.gender === undefined ? student.gender : String(patch.gender || '').trim();
-      student.birthday = patch.birthday === undefined ? student.birthday : String(patch.birthday || '').trim();
+      student.graduationDate = patch.graduationDate === undefined ? (student.graduationDate || '') : String(patch.graduationDate || '').trim();
       student.enrolledAt = patch.enrolledAt === undefined ? student.enrolledAt : String(patch.enrolledAt || '').trim();
       student.remark = patch.remark === undefined ? student.remark : String(patch.remark || '').trim();
       return student;
@@ -251,6 +290,49 @@ function createAppWithOptions({
       student.status = 'archived';
       student.archivedAt = new Date().toISOString();
       return student;
+    },
+
+    updateTeacherStudent(studentId, patch = {}, session = {}) {
+      const student = db.students.find((item) => Number(item.id) === Number(studentId));
+      if (!student) throw createHttpError('student not found', 404);
+      assertTeacherStudentClassAccess(session, student);
+
+      if (patch.className !== undefined) {
+        const className = String(patch.className || '').trim();
+        if (!className) throw new Error('student name and class are required');
+        if (!findClassOption(db, className)) throw new Error('class not found');
+        assertTeacherTargetClassAccess(session, className);
+        student.className = className;
+      }
+
+      if (patch.learningStage !== undefined) {
+        student.learningStage = normalizeStudentLearningStage(patch.learningStage);
+      } else {
+        student.learningStage = normalizeStudentLearningStage(student.learningStage);
+      }
+
+      return student;
+    },
+
+    bulkUpdateStudentLearningStage(input = {}, session = {}) {
+      const className = String(input.className || '').trim();
+      if (!className) throw new Error('class name is required');
+      if (!findClassOption(db, className)) throw new Error('class not found');
+      if (session.role === 'teacher') {
+        assertTeacherTargetClassAccess(session, className);
+      }
+      const learningStage = normalizeStudentLearningStage(input.learningStage);
+      const students = db.students
+        .filter((student) => student.status === 'active')
+        .filter((student) => student.className === className);
+      students.forEach((student) => {
+        student.learningStage = learningStage;
+      });
+
+      return {
+        updatedCount: students.length,
+        students: students.map((student) => ({ ...student }))
+      };
     },
 
     removeStudentFromTeacherClass(studentId, session = {}) {
@@ -495,13 +577,22 @@ function createAppWithOptions({
       const record = {
         id: db.nextInterviewId++,
         studentId,
+        scheduleId: input.scheduleId ? Number(input.scheduleId) : null,
+        teacherId: input.teacherId ? Number(input.teacherId) : null,
+        teacherName: input.teacherName || '',
         companyName: input.companyName || '',
         positionName: input.positionName || '',
         interviewAt: input.interviewAt || '',
         result,
         feedback: input.feedback || '',
         hiredStatus,
-        remark: input.remark || ''
+        remark: input.remark || '',
+        scheduleStatus: input.scheduleStatus || '',
+        source: input.source || (input.scheduleId ? 'schedule' : 'manual'),
+        transcriptFileName: input.transcriptFileName || '',
+        transcriptFilePath: input.transcriptFilePath || '',
+        transcriptFileSize: input.transcriptFileSize || 0,
+        transcriptUploadedAt: input.transcriptUploadedAt || ''
       };
       db.interviewRecords.push(record);
       return record;
@@ -513,6 +604,9 @@ function createAppWithOptions({
       if (patch.studentId !== undefined) {
         record.studentId = requireExistingStudent(db, patch.studentId).id;
       }
+      record.scheduleId = patch.scheduleId === undefined ? record.scheduleId : (patch.scheduleId ? Number(patch.scheduleId) : null);
+      record.teacherId = patch.teacherId === undefined ? record.teacherId : (patch.teacherId ? Number(patch.teacherId) : null);
+      record.teacherName = patch.teacherName ?? record.teacherName ?? '';
       record.companyName = patch.companyName ?? record.companyName;
       record.positionName = patch.positionName ?? record.positionName;
       record.interviewAt = patch.interviewAt ?? record.interviewAt;
@@ -524,6 +618,12 @@ function createAppWithOptions({
         ? record.hiredStatus
         : normalizeEnum(patch.hiredStatus, VALID_HIRED_STATUSES, 'invalid hired status');
       record.remark = patch.remark ?? record.remark;
+      record.scheduleStatus = patch.scheduleStatus ?? record.scheduleStatus ?? '';
+      record.source = patch.source ?? record.source ?? (record.scheduleId ? 'schedule' : 'manual');
+      record.transcriptFileName = patch.transcriptFileName ?? record.transcriptFileName ?? '';
+      record.transcriptFilePath = patch.transcriptFilePath ?? record.transcriptFilePath ?? '';
+      record.transcriptFileSize = patch.transcriptFileSize ?? record.transcriptFileSize ?? 0;
+      record.transcriptUploadedAt = patch.transcriptUploadedAt ?? record.transcriptUploadedAt ?? '';
       return record;
     },
 
@@ -532,8 +632,9 @@ function createAppWithOptions({
         if (filters.studentId && record.studentId !== Number(filters.studentId)) return false;
         if (filters.companyName && !record.companyName.includes(filters.companyName)) return false;
         if (filters.result && record.result !== filters.result) return false;
+        if (filters.source && interviewRecordSource(record) !== filters.source) return false;
         return true;
-      });
+      }).map((record) => withInterviewStudent(db, record));
       return { items, total: items.length };
     },
 
@@ -586,9 +687,15 @@ function createAppWithOptions({
     },
 
     requestInterviewSchedule(input) {
-      assertTeacherParticipatesInScheduling(baseAuthAccounts, db, teacherDirectory, input.teacherId);
+      const teacher = assertTeacherParticipatesInScheduling(baseAuthAccounts, db, teacherDirectory, input.teacherId);
       assertStudentCanRequestSchedule(db, input.studentId);
-      return this.createInterviewSchedule({ ...input, status: 'requested', requestSource: 'student' });
+      assertStudentScheduleBookingRules(input);
+      return this.createInterviewSchedule({
+        ...input,
+        teacherName: input.teacherName || teacher.name || '',
+        status: 'requested',
+        requestSource: 'student'
+      });
     },
 
     createAdminInterviewSchedule(input, session = {}) {
@@ -639,6 +746,17 @@ function createAppWithOptions({
       return schedule;
     },
 
+    cancelStudentInterviewSchedule(id, session = {}) {
+      const schedule = db.interviewSchedules.find((item) => item.id === Number(id));
+      if (!schedule) throw new Error('schedule not found');
+      if (Number(schedule.studentId) !== Number(session.studentId)) {
+        throw createHttpError('forbidden', 403);
+      }
+      assertScheduleTransition(schedule, ['requested'], 'cancelled');
+      schedule.status = 'cancelled';
+      return schedule;
+    },
+
     completeInterviewSchedule(id) {
       const schedule = db.interviewSchedules.find((item) => item.id === id);
       if (!schedule) throw new Error('schedule not found');
@@ -673,6 +791,7 @@ function createAppWithOptions({
       schedule.transcriptFilePath = filePath;
       schedule.transcriptFileSize = content.length;
       schedule.transcriptUploadedAt = input.uploadedAt || new Date().toISOString();
+      syncInterviewRecordFromSchedule(db, schedule);
       return schedule;
     },
 
@@ -689,6 +808,19 @@ function createAppWithOptions({
         fileName: schedule.transcriptFileName || path.basename(schedule.transcriptFilePath),
         contentType: 'text/plain; charset=utf-8',
         body: fs.readFileSync(schedule.transcriptFilePath)
+      };
+    },
+
+    getInterviewRecordTranscriptFile(id) {
+      const record = db.interviewRecords.find((item) => item.id === Number(id));
+      if (!record) throw new Error('interview record not found');
+      if (!record.transcriptFilePath || !fs.existsSync(record.transcriptFilePath)) {
+        throw createHttpError('interview transcript file not found', 404);
+      }
+      return {
+        fileName: record.transcriptFileName || path.basename(record.transcriptFilePath),
+        contentType: 'text/plain; charset=utf-8',
+        body: fs.readFileSync(record.transcriptFilePath)
       };
     },
 
@@ -715,8 +847,16 @@ function createAppWithOptions({
       const days = buildWeek(filters.weekStart || currentWeekStart());
       const from = `${days[0]}T00:00:00`;
       const to = `${days[6]}T23:59:59`;
-      const entries = this.listInterviewSchedules({ from, to }).items
+      const availableTeacherIds = new Set(
+        this.listTeachers({ forStudent: true }).items.map((teacher) => Number(teacher.id))
+      );
+      const teacherId = filters.teacherId ? Number(filters.teacherId) : 0;
+      if (teacherId && !availableTeacherIds.has(teacherId)) {
+        throw createHttpError('teacher not available for scheduling', 403);
+      }
+      const entries = this.listInterviewSchedules({ from, to, teacherId }).items
         .filter((schedule) => schedule.status !== 'cancelled')
+        .filter((schedule) => teacherId || availableTeacherIds.has(Number(schedule.teacherId)) || Number(schedule.studentId) === studentId)
         .sort((left, right) => left.startsAt.localeCompare(right.startsAt))
         .map((schedule) => redactScheduleForStudent(schedule, studentId));
       return { weeks: days, entries };
@@ -753,7 +893,8 @@ function createAppWithOptions({
       return {
         student,
         homeworkRecords: this.listHomeworkRecords({ studentId }).items,
-        interviewRecords: this.listInterviewRecords({ studentId }).items
+        interviewRecords: this.listInterviewRecords({ studentId }).items,
+        scheduleGuard: buildStudentScheduleGuard(db, studentId)
       };
     },
 
@@ -917,6 +1058,31 @@ function createAppWithOptions({
       return publicClassOption(db, classOption);
     },
 
+    deleteClass(classId, session = {}) {
+      const classOption = (db.classes || []).find((item) => Number(item.id) === Number(classId));
+      if (!classOption) throw createHttpError('class not found', 404);
+      if (session.role === 'teacher') {
+        assertTeacherTargetClassAccess(session, classOption.className);
+      }
+
+      const activeStudentCount = db.students.filter((student) =>
+        student.status === 'active' && student.className === classOption.className
+      ).length;
+      if (activeStudentCount > 0) throw new Error('class has active students');
+
+      const activeAssignmentCount = db.homeworkAssignments.filter((assignment) =>
+        assignment.className === classOption.className && !assignment.deletedAt
+      ).length;
+      if (activeAssignmentCount > 0) throw new Error('class has active homework assignments');
+
+      db.classes = db.classes.filter((item) => Number(item.id) !== Number(classId));
+      removeClassNameFromTeacherAccounts(baseAuthAccounts, db, classOption.className);
+      if (Array.isArray(session.classNames)) {
+        session.classNames = session.classNames.filter((className) => className !== classOption.className);
+      }
+      return publicClassOption(db, classOption);
+    },
+
     login({ username, password }) {
       clearExpiredSessions(sessions);
       const normalizedUsername = String(username || '').trim();
@@ -971,9 +1137,18 @@ function createAppWithOptions({
 
     exportStudents(filters = {}) {
       const students = this.listStudents(filters).items;
-      const rows = [['姓名', '手机号', '性别', '班级/课程', '入学时间', '状态', '备注']];
+      const rows = [['姓名', '手机号', '性别', '班级/课程', '入学时间', '档案状态', '学习阶段', '备注']];
       for (const student of students) {
-        rows.push([student.name, student.phone, student.gender, student.className, student.enrolledAt, student.status, student.remark]);
+        rows.push([
+          student.name,
+          student.phone,
+          student.gender,
+          student.className,
+          student.enrolledAt,
+          studentStatusLabel(student.status),
+          studentLearningStageLabel(student.learningStage),
+          student.remark
+        ]);
       }
       return toCsvWithBom(rows);
     },
@@ -1099,11 +1274,38 @@ function createAppWithOptions({
 
     exportInterviewRecords(filters = {}) {
       const records = this.listInterviewRecords(filters).items;
-      const rows = [['公司', '岗位', '学生ID', '面试时间', '结果', '反馈', '入职状态', '备注']];
+      const rows = [['公司', '岗位', '学生ID', '学生姓名', '班级/课程', '老师', '面试时间', '结果', '反馈', '入职状态', '备注', '来源', 'TXT文件名', 'TXT上传时间']];
       for (const record of records) {
-        rows.push([record.companyName, record.positionName, record.studentId, record.interviewAt, record.result, record.feedback, record.hiredStatus, record.remark]);
+        rows.push(interviewExportRow(record));
       }
       return toCsvWithBom(rows);
+    },
+
+    exportInterviewTranscriptsZip(filters = {}) {
+      const records = this.listInterviewRecords(filters).items;
+      const rows = [['公司', '岗位', '学生ID', '学生姓名', '班级/课程', '老师', '面试时间', '结果', '反馈', '入职状态', '备注', '来源', 'TXT文件名', 'TXT上传时间']];
+      const entries = [];
+
+      for (const record of records) {
+        rows.push(interviewExportRow(record));
+        if (record.transcriptFilePath && fs.existsSync(record.transcriptFilePath)) {
+          const studentName = sanitizeFileName(record.studentName || `学生${record.studentId}`);
+          const companyName = sanitizeFileName(record.companyName || `面试${record.id}`);
+          const fileName = sanitizeFileName(record.transcriptFileName || path.basename(record.transcriptFilePath));
+          entries.push({
+            name: `面试记录TXT/${studentName}-${record.studentId}-${companyName}-${fileName}`,
+            data: fs.readFileSync(record.transcriptFilePath)
+          });
+        }
+      }
+
+      entries.unshift({ name: '面试记录清单.csv', data: Buffer.from(toCsvWithBom(rows), 'utf8') });
+
+      return {
+        fileName: '面试记录TXT.zip',
+        contentType: 'application/zip',
+        body: createZip(entries)
+      };
     }
   };
 }
@@ -1250,6 +1452,17 @@ function bindClassToTeacher(classOption, session = {}) {
   }
   if (session.username && !classOption.teacherUsernames.includes(session.username)) {
     classOption.teacherUsernames.push(session.username);
+  }
+}
+
+function removeClassNameFromTeacherAccounts(baseAuthAccounts, db, className) {
+  const normalized = String(className || '').trim();
+  if (!normalized) return;
+  for (const account of listAllAuthAccounts(baseAuthAccounts, db, { includeDisabled: true })) {
+    if (account.role !== 'teacher') continue;
+    if (!Array.isArray(account.classNames) || !account.classNames.includes(normalized)) continue;
+    const stored = ensureStoredAccount(baseAuthAccounts, db, account);
+    stored.classNames = stored.classNames.filter((item) => item !== normalized);
   }
 }
 
@@ -1420,6 +1633,18 @@ function accountStatusLabel(status) {
   return '正常';
 }
 
+function studentStatusLabel(status) {
+  if (status === 'archived') return '已归档';
+  return '在读';
+}
+
+function studentLearningStageLabel(stage) {
+  const normalized = normalizeStudentLearningStage(stage);
+  if (normalized === 'job_seeking') return '求职中';
+  if (normalized === 'employed') return '已就业';
+  return '学习中';
+}
+
 function countByEnum(records, fieldName, values) {
   const result = {};
   for (const value of values) {
@@ -1491,6 +1716,14 @@ function assertTeacherStudentClassAccess(session = {}, student = {}) {
   const classNames = Array.isArray(session.classNames) ? session.classNames : [];
   if (!classNames.includes(student.className || '')) {
     throw createHttpError('forbidden', 403);
+  }
+}
+
+function assertTeacherTargetClassAccess(session = {}, className = '') {
+  if (session.role !== 'teacher') return;
+  const classNames = Array.isArray(session.classNames) ? session.classNames : [];
+  if (!classNames.includes(className || '')) {
+    throw createHttpError('target class forbidden', 403);
   }
 }
 
@@ -1685,12 +1918,54 @@ function withHomeworkStudent(db, record, now = new Date().toISOString()) {
 
 function withInterviewStudent(db, record) {
   const student = db.students.find((item) => item.id === record.studentId);
+  const source = interviewRecordSource(record);
   return {
     ...record,
+    source,
+    sourceText: interviewRecordSourceLabel(source),
     studentName: student?.name || '',
     studentPhone: student?.phone || '',
     className: student?.className || ''
   };
+}
+
+function syncInterviewRecordFromSchedule(db, schedule) {
+  let record = db.interviewRecords.find((item) => Number(item.scheduleId) === Number(schedule.id));
+  const next = {
+    studentId: schedule.studentId,
+    scheduleId: schedule.id,
+    teacherId: schedule.teacherId,
+    teacherName: schedule.teacherName || '',
+    companyName: schedule.companyName || '',
+    positionName: schedule.positionName || '',
+    interviewAt: schedule.startsAt || '',
+    scheduleStatus: schedule.status || '',
+    source: 'schedule',
+    transcriptFileName: schedule.transcriptFileName || '',
+    transcriptFilePath: schedule.transcriptFilePath || '',
+    transcriptFileSize: schedule.transcriptFileSize || 0,
+    transcriptUploadedAt: schedule.transcriptUploadedAt || ''
+  };
+
+  if (record) {
+    Object.assign(record, next);
+    record.result = record.result || 'pending';
+    record.hiredStatus = record.hiredStatus || 'pending';
+    record.feedback = record.feedback || '';
+    record.remark = record.remark || '';
+    return record;
+  }
+
+  record = {
+    id: db.nextInterviewId++,
+    ...next,
+    result: 'pending',
+    feedback: '',
+    hiredStatus: 'pending',
+    remark: ''
+  };
+  db.interviewRecords.push(record);
+  return record;
 }
 
 function clearExpiredSessions(sessions) {
@@ -1776,6 +2051,52 @@ function homeworkLateStatusLabel(status) {
   return labels[status] || '';
 }
 
+function interviewResultLabel(status) {
+  const labels = {
+    pending: '待反馈',
+    passed: '通过',
+    failed: '未通过'
+  };
+  return labels[status] || status || '';
+}
+
+function hiredStatusLabel(status) {
+  const labels = {
+    pending: '待确认入职',
+    hired: '已入职',
+    not_hired: '未入职'
+  };
+  return labels[status] || status || '';
+}
+
+function interviewRecordSource(record) {
+  return record.source || (record.scheduleId ? 'schedule' : 'manual');
+}
+
+function interviewRecordSourceLabel(source) {
+  return source === 'schedule' ? '排期同步' : '手动录入';
+}
+
+function interviewExportRow(record) {
+  const source = interviewRecordSource(record);
+  return [
+    record.companyName,
+    record.positionName,
+    record.studentId,
+    record.studentName || `#${record.studentId}`,
+    record.className || '',
+    record.teacherName || '',
+    record.interviewAt,
+    interviewResultLabel(record.result),
+    record.feedback,
+    hiredStatusLabel(record.hiredStatus),
+    record.remark,
+    interviewRecordSourceLabel(source),
+    record.transcriptFileName || '',
+    record.transcriptUploadedAt || ''
+  ];
+}
+
 function confirmInterviewSchedule(db, id, input, confirmedByRole) {
   const schedule = db.interviewSchedules.find((item) => item.id === id);
   if (!schedule) throw new Error('schedule not found');
@@ -1796,6 +2117,7 @@ function assertTeacherParticipatesInScheduling(baseAuthAccounts, db, teacherDire
   if (teacher.username && teacher.participatesInScheduling !== true) {
     throw new Error('teacher not available for scheduling');
   }
+  return teacher;
 }
 
 function assertStudentCanRequestSchedule(db, studentId) {
@@ -1805,6 +2127,7 @@ function assertStudentCanRequestSchedule(db, studentId) {
 }
 
 function buildStudentScheduleGuard(db, studentId) {
+  const student = db.students.find((item) => Number(item.id) === Number(studentId));
   const studentSchedules = db.interviewSchedules.filter((schedule) => Number(schedule.studentId) === Number(studentId));
   const pendingTranscriptSchedules = studentSchedules
     .filter(isScheduleTranscriptRequired)
@@ -1812,7 +2135,9 @@ function buildStudentScheduleGuard(db, studentId) {
   const unfinishedCount = studentSchedules.filter((schedule) => UNFINISHED_SCHEDULE_STATUSES.has(schedule.status)).length;
   let reason = '';
 
-  if (pendingTranscriptSchedules.length) {
+  if (!isStudentEligibleForScheduling(student)) {
+    reason = 'student not eligible for scheduling';
+  } else if (pendingTranscriptSchedules.length) {
     reason = 'interview transcript required';
   } else if (unfinishedCount >= MAX_UNFINISHED_STUDENT_SCHEDULES) {
     reason = 'unfinished schedule limit reached';
@@ -1821,10 +2146,16 @@ function buildStudentScheduleGuard(db, studentId) {
   return {
     canRequest: !reason,
     reason,
+    learningStage: normalizeStudentLearningStage(student?.learningStage),
+    studentStatus: student?.status || '',
     unfinishedCount,
     maxUnfinishedCount: MAX_UNFINISHED_STUDENT_SCHEDULES,
     pendingTranscriptSchedules: pendingTranscriptSchedules.map((schedule) => ({ ...schedule }))
   };
+}
+
+function isStudentEligibleForScheduling(student) {
+  return student?.status === 'active' && normalizeStudentLearningStage(student.learningStage) === 'job_seeking';
 }
 
 function isScheduleTranscriptRequired(schedule) {
@@ -1864,6 +2195,33 @@ function requireScheduleFields(input) {
   if (!input.studentId || !input.teacherId || !input.teacherName || !input.startsAt || !input.endsAt) {
     throw new Error('schedule fields are required');
   }
+}
+
+function assertStudentScheduleBookingRules(input) {
+  assertScheduleTime(input);
+  const start = parseScheduleDate(input.startsAt);
+  const end = parseScheduleDate(input.endsAt);
+  if (!start || !end) throw new Error('invalid schedule time');
+  if (start.getTime() <= Date.now()) throw new Error('schedule time is in the past');
+  const durationMinutes = (end.getTime() - start.getTime()) / 60000;
+  if (durationMinutes > STUDENT_SCHEDULE_MAX_DURATION_MINUTES) {
+    throw new Error('schedule duration too long');
+  }
+  if (!isHalfHourAligned(start) || !isHalfHourAligned(end) || durationMinutes % STUDENT_SCHEDULE_SLOT_MINUTES !== 0) {
+    throw new Error('invalid schedule slot');
+  }
+}
+
+function parseScheduleDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function isHalfHourAligned(date) {
+  return date.getMinutes() % STUDENT_SCHEDULE_SLOT_MINUTES === 0 &&
+    date.getSeconds() === 0 &&
+    date.getMilliseconds() === 0;
 }
 
 function assertScheduleTime(schedule) {
@@ -1929,6 +2287,10 @@ function normalizeEnum(value, validValues, message) {
   const normalized = String(value || '').trim();
   if (!validValues.has(normalized)) throw new Error(message);
   return normalized;
+}
+
+function normalizeStudentLearningStage(value) {
+  return normalizeEnum(value || 'studying', VALID_STUDENT_LEARNING_STAGES, 'invalid student learning stage');
 }
 
 function assertLoginAllowed(loginFailures, username) {

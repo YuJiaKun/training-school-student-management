@@ -1,142 +1,177 @@
 import { useEffect, useMemo, useState } from 'react';
-import { apiGet } from '../api.js';
+import { apiGet, apiPatch } from '../api.js';
+import InterviewScheduleCalendar, {
+  scheduleToCalendarEvent,
+  toLocalDateTimeValue
+} from '../components/InterviewScheduleCalendar.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
+import { buildPath } from '../utils/url.js';
 
-const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+const ACTIVE_CALENDAR_STATUSES = new Set(['requested', 'scheduled', 'confirmed', 'rescheduled', 'completed']);
 
-function formatDate(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+function formatDateTime(value) {
+  if (!value) return '-';
+  return value.replace('T', ' ').slice(0, 16);
 }
 
-function getWeekStart(input = new Date()) {
-  const date = new Date(input);
-  const day = date.getDay() || 7;
-  date.setDate(date.getDate() - day + 1);
-  date.setHours(0, 0, 0, 0);
-  return formatDate(date);
+function readRange(rangeInfo) {
+  return {
+    from: toLocalDateTimeValue(rangeInfo.start),
+    to: toLocalDateTimeValue(rangeInfo.end)
+  };
 }
 
-function moveWeek(weekStart, offset) {
-  const date = new Date(`${weekStart}T00:00:00`);
-  date.setDate(date.getDate() + offset * 7);
-  return formatDate(date);
-}
-
-function buildWeekDates(weekStart) {
-  const start = new Date(`${weekStart}T00:00:00`);
-  return Array.from({ length: 7 }, (_, index) => {
-    const date = new Date(start);
-    date.setDate(start.getDate() + index);
-    return formatDate(date);
-  });
-}
-
-function formatTimeRange(schedule) {
-  const start = schedule.startsAt?.slice(11, 16) || '--:--';
-  const end = schedule.endsAt?.slice(11, 16) || '--:--';
-  return `${start}-${end}`;
-}
-
-function groupEntriesByDate(entries) {
-  return entries.reduce((result, entry) => {
-    const date = entry.startsAt?.slice(0, 10);
-    if (!date) return result;
-    result[date] = result[date] || [];
-    result[date].push(entry);
-    return result;
-  }, {});
-}
-
-export default function SchedulesPage() {
-  const [weekStart, setWeekStart] = useState(() => getWeekStart());
-  const [timeline, setTimeline] = useState({ weeks: [], teachers: [] });
+export default function SchedulesPage({ user = {} }) {
+  const isAdmin = user.role === 'admin';
+  const [teachers, setTeachers] = useState([]);
+  const [selectedTeacherId, setSelectedTeacherId] = useState(isAdmin ? '' : String(user.teacherId || ''));
+  const [range, setRange] = useState(null);
+  const [schedules, setSchedules] = useState([]);
+  const [selectedSchedule, setSelectedSchedule] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [savingMove, setSavingMove] = useState(false);
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    if (!isAdmin) setSelectedTeacherId(String(user.teacherId || ''));
+  }, [isAdmin, user.teacherId]);
 
   useEffect(() => {
     let ignore = false;
-    setLoading(true);
-    setError('');
-    apiGet(`/api/schedules/timeline?weekStart=${encodeURIComponent(weekStart)}`)
+    apiGet('/api/teachers')
       .then((data) => {
-        if (!ignore) setTimeline({ weeks: data.weeks || [], teachers: data.teachers || [] });
+        if (!ignore) setTeachers(data.items || []);
       })
       .catch((err) => {
-        if (!ignore) setError(err.message || '排期总览加载失败');
-      })
-      .finally(() => {
-        if (!ignore) setLoading(false);
+        if (!ignore) setError(err.message || '老师列表加载失败');
       });
     return () => {
       ignore = true;
     };
-  }, [weekStart]);
+  }, []);
 
-  const weekDays = timeline.weeks.length ? timeline.weeks : buildWeekDates(weekStart);
-  const weekTitle = useMemo(() => `${weekDays[0]} 至 ${weekDays[6]}`, [weekDays]);
+  async function loadSchedules(nextRange = range, nextTeacherId = selectedTeacherId) {
+    if (!nextRange) return;
+    setLoading(true);
+    setError('');
+    try {
+      const data = await apiGet(buildPath('/api/schedules', {
+        from: nextRange.from,
+        to: nextRange.to,
+        teacherId: nextTeacherId || ''
+      }));
+      setSchedules((data.items || []).filter((schedule) => ACTIVE_CALENDAR_STATUSES.has(schedule.status)));
+    } catch (err) {
+      setSchedules([]);
+      setError(err.message || '排期日历加载失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleDatesSet(rangeInfo) {
+    const nextRange = readRange(rangeInfo);
+    setRange(nextRange);
+    loadSchedules(nextRange);
+  }
+
+  async function handleEventMove(info) {
+    if (!isAdmin) {
+      info.revert();
+      return;
+    }
+
+    setSavingMove(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await apiPatch(`/api/schedules/${info.event.id}`, {
+        startsAt: toLocalDateTimeValue(info.event.start),
+        endsAt: toLocalDateTimeValue(info.event.end)
+      });
+      setSelectedSchedule(result.schedule);
+      setMessage('排期时间已更新。');
+      await loadSchedules();
+    } catch (err) {
+      info.revert();
+      setError(err.message || '排期时间更新失败，已恢复原时间。');
+    } finally {
+      setSavingMove(false);
+    }
+  }
+
+  const events = useMemo(() => schedules.map((schedule) => scheduleToCalendarEvent(schedule, { editable: isAdmin })), [isAdmin, schedules]);
+  const filteredTeacher = teachers.find((teacher) => String(teacher.id) === String(selectedTeacherId));
 
   return (
     <section className="page schedules-page">
       <header className="page-header">
         <div>
           <p className="eyebrow">排期总览</p>
-          <h1>一周面试排期</h1>
-          <p className="muted">按老师维度查看本周已确认排期，方便快速发现时间占用。</p>
+          <h1>{isAdmin ? '面试排期日历' : '我的面试排期'}</h1>
+          <p className="muted">
+            {isAdmin
+              ? '按周或按日查看全部排期；拖动事件可调整时间，系统会自动校验冲突。'
+              : '查看自己的待审批和已确认排期，审批操作仍在“我的教务工作台”处理。'}
+          </p>
         </div>
-        <div className="toolbar">
-          <button type="button" onClick={() => setWeekStart(moveWeek(weekStart, -1))}>上一周</button>
-          <strong>{weekTitle}</strong>
-          <button type="button" onClick={() => setWeekStart(moveWeek(weekStart, 1))}>下一周</button>
+        <div className="toolbar schedule-calendar-toolbar">
+          {isAdmin ? (
+            <select
+              value={selectedTeacherId}
+              onChange={(event) => {
+                const nextTeacherId = event.target.value;
+                setSelectedTeacherId(nextTeacherId);
+                loadSchedules(range, nextTeacherId);
+              }}
+            >
+              <option value="">全部老师</option>
+              {teachers.map((teacher) => (
+                <option value={teacher.id} key={teacher.id}>{teacher.name || `老师 #${teacher.id}`}</option>
+              ))}
+            </select>
+          ) : (
+            <strong>{filteredTeacher?.name || user.teacherName || user.username || '当前老师'}</strong>
+          )}
+          <span className="muted">{loading ? '正在加载...' : `${schedules.length} 条排期`}</span>
+          {savingMove ? <span className="muted">正在保存时间...</span> : null}
         </div>
       </header>
 
-      {error && <div className="alert alert-error">{error}</div>}
-      {loading && <div className="empty-state">正在加载排期总览...</div>}
+      {error ? <div className="alert alert-error">{error}</div> : null}
+      {message ? <div className="alert alert-success">{message}</div> : null}
 
-      {!loading && !timeline.teachers.length && (
-        <div className="empty-state">本周暂无已确认排期。</div>
-      )}
+      <section className="panel schedule-calendar-panel">
+        <InterviewScheduleCalendar
+          events={events}
+          editable={isAdmin}
+          onDatesSet={handleDatesSet}
+          onEventClick={(info) => setSelectedSchedule(info.event.extendedProps.schedule)}
+          onEventDrop={handleEventMove}
+          onEventResize={handleEventMove}
+        />
+      </section>
 
-      {!loading && timeline.teachers.length > 0 && (
-        <div className="schedule-week-table">
-          <div className="schedule-week-row schedule-week-head">
-            <div className="teacher-column">老师</div>
-            {weekDays.map((date, index) => (
-              <div className="day-column" key={date}>
-                <span>{WEEKDAY_LABELS[index]}</span>
-                <strong>{date.slice(5)}</strong>
-              </div>
-            ))}
+      <section className="panel schedule-detail-card">
+        <div className="panel-header">
+          <div>
+            <h2>排期详情</h2>
+            <p className="muted">点击日历事件查看学生、公司、岗位和状态。</p>
           </div>
-
-          {timeline.teachers.map((teacher) => {
-            const entriesByDate = groupEntriesByDate(teacher.entries || []);
-            return (
-              <div className="schedule-week-row" key={teacher.teacherId || teacher.teacherName}>
-                <div className="teacher-column">
-                  <strong>{teacher.teacherName || '未命名老师'}</strong>
-                  <span>#{teacher.teacherId}</span>
-                </div>
-                {weekDays.map((date) => (
-                  <div className="day-column" key={date}>
-                    {(entriesByDate[date] || []).map((entry) => (
-                      <article className="schedule-card" key={entry.id}>
-                        <div className="schedule-card-time">{formatTimeRange(entry)}</div>
-                        <strong>{entry.studentName || '未命名学生'}</strong>
-                        <span>{entry.companyName || '未填写公司'} · {entry.positionName || '未填写岗位'}</span>
-                        <StatusBadge status={entry.status} />
-                      </article>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            );
-          })}
         </div>
-      )}
+        {!selectedSchedule ? (
+          <div className="empty-state">暂未选择排期。</div>
+        ) : (
+          <div className="schedule-detail-grid">
+            <strong>{selectedSchedule.studentName || '未命名学生'}</strong>
+            <span>{selectedSchedule.teacherName || '未命名老师'}</span>
+            <span>{selectedSchedule.companyName || '未填写公司'} / {selectedSchedule.positionName || '未填写岗位'}</span>
+            <span>{formatDateTime(selectedSchedule.startsAt)} 至 {formatDateTime(selectedSchedule.endsAt)}</span>
+            <StatusBadge status={selectedSchedule.status} />
+          </div>
+        )}
+      </section>
     </section>
   );
 }

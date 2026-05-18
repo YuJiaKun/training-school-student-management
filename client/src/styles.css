@@ -226,6 +226,18 @@ textarea:focus {
   font-weight: 800;
 }
 
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.button.is-disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
 .primary-button,
 .button-primary {
   border-color: var(--primary);
@@ -427,6 +439,22 @@ textarea:focus {
   font-size: 24px;
 }
 
+.topbar-student {
+  align-items: center;
+  padding: 14px 18px;
+  margin-bottom: 14px;
+}
+
+.topbar-student h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.topbar-student .user-actions {
+  gap: 8px;
+}
+
 .user-actions,
 .toolbar,
 .form-actions,
@@ -448,6 +476,25 @@ textarea:focus {
   color: #334155;
   padding: 0 12px;
   font-weight: 800;
+}
+
+.table-stack {
+  display: grid;
+  gap: 3px;
+  min-width: 150px;
+}
+
+.table-stack a {
+  color: var(--primary-dark);
+  font-weight: 900;
+}
+
+.table-stack span,
+.table-stack small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .user-name {
@@ -1647,11 +1694,25 @@ tr:last-child td {
   gap: 18px;
 }
 
-.student-summary-card {
+.student-summary-card,
+.student-overview-card {
   display: grid;
   grid-template-columns: minmax(280px, 1fr) minmax(360px, 1.3fr);
   gap: 18px;
   align-items: stretch;
+}
+
+.student-overview-card {
+  grid-template-columns: minmax(320px, 1fr) minmax(360px, 520px);
+  align-items: center;
+  padding: 18px 20px;
+}
+
+.student-overview-strip {
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 440px);
+  gap: 14px;
+  min-height: 86px;
+  padding: 12px 16px;
 }
 
 .student-summary-main {
@@ -1672,16 +1733,74 @@ tr:last-child td {
   font-weight: 700;
 }
 
+.student-overview-main {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.student-overview-main .eyebrow {
+  margin: 0;
+}
+
+.student-overview-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.student-overview-title h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 26px;
+  line-height: 1.1;
+}
+
+.student-overview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.student-overview-meta span {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 0 10px;
+}
+
 .student-metric-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
+.student-overview-metrics .metric {
+  min-height: 62px;
+  display: grid;
+  align-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f8fafc, #fff);
+  padding: 12px;
+}
+
+.student-overview-metrics .metric strong {
+  margin-top: 4px;
+  font-size: 24px;
+  line-height: 1;
+}
+
 .student-workspace-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.9fr);
-  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 24px;
   align-items: start;
 }
 
@@ -1689,7 +1808,7 @@ tr:last-child td {
 .homework-card-list,
 .student-profile-form {
   display: grid;
-  gap: 12px;
+  gap: 16px;
 }
 
 .student-profile-form label {
@@ -1699,6 +1818,26 @@ tr:last-child td {
 
 .student-homework-panel {
   min-width: 0;
+  min-height: 520px;
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
+
+.student-homework-empty {
+  display: grid;
+  gap: 6px;
+  text-align: left;
+  padding: 18px;
+}
+
+.student-homework-empty strong {
+  color: #334155;
+  font-size: 16px;
+}
+
+.student-homework-empty span {
+  line-height: 1.6;
 }
 
 .homework-card {
@@ -1710,6 +1849,70 @@ tr:last-child td {
   border-radius: 8px;
   background: #fff;
   padding: 14px;
+}
+
+.homework-workspace {
+  display: grid;
+  gap: 14px;
+}
+
+.homework-workspace-section {
+  display: grid;
+  gap: 10px;
+}
+
+.homework-section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+
+.homework-section-heading h3,
+.homework-section-heading p {
+  margin: 0;
+}
+
+.homework-section-heading h3 {
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.homework-section-heading p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.homework-section-heading span {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  padding: 5px 10px;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.homework-task-row {
+  grid-template-columns: 1fr;
+  align-items: start;
+  padding: 12px 14px;
+}
+
+.homework-task-row.is-pending {
+  border-color: #bfdbfe;
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+}
+
+.homework-task-row.is-submitted {
+  background: #fff;
 }
 
 .homework-card-main {
@@ -1731,6 +1934,131 @@ tr:last-child td {
 .homework-meta {
   margin: 8px 0 0;
   color: var(--muted);
+}
+
+.homework-task-action {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(100px, 0.9fr) auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+
+.homework-task-action input {
+  min-width: 0;
+}
+
+.homework-task-action .button {
+  min-width: 96px;
+  white-space: nowrap;
+}
+
+.homework-history-section {
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 12px;
+}
+
+.homework-history-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.homework-history-summary h3,
+.homework-history-summary p {
+  margin: 0;
+}
+
+.homework-history-summary h3 {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.homework-history-summary p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.homework-history-list {
+  margin-top: 12px;
+}
+
+.homework-recent-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fff, #f8fafc);
+  padding: 14px;
+}
+
+.homework-recent-list {
+  display: grid;
+  gap: 8px;
+}
+
+.homework-recent-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #e8eef6;
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px 12px;
+}
+
+.homework-recent-item strong,
+.homework-recent-item p {
+  margin: 0;
+}
+
+.homework-recent-item strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.homework-recent-item p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.homework-recent-empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  padding: 12px;
+  font-weight: 700;
+}
+
+.homework-note-strip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1e3a8a;
+  padding: 12px 14px;
+}
+
+.homework-note-strip strong {
+  white-space: nowrap;
+}
+
+.homework-note-strip span {
+  color: #475569;
+  font-weight: 700;
+  line-height: 1.5;
 }
 
 .student-placeholder-card {
@@ -1755,6 +2083,421 @@ tr:last-child td {
 
 .student-mini-record {
   display: block;
+}
+
+.student-profile-card {
+  display: grid;
+  gap: 12px;
+}
+
+.student-profile-card .panel-header {
+  align-items: flex-start;
+}
+
+.student-profile-summary-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+}
+
+.profile-completion-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.profile-completion-row strong,
+.profile-completion-row span,
+.profile-completion-row b {
+  display: block;
+}
+
+.profile-completion-row span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.profile-completion-row b {
+  color: var(--primary);
+  font-size: 20px;
+}
+
+.profile-completion-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.profile-completion-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.student-profile-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.student-profile-summary div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 9px 10px;
+}
+
+.student-profile-summary dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.student-profile-summary dd {
+  margin: 3px 0 0;
+  color: #334155;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.profile-missing-list {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.profile-missing-list div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.profile-missing-list b {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: #334155;
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.student-profile-card .student-profile-form {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.compact-actions {
+  gap: 8px;
+}
+
+.student-schedule-entry-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  background: linear-gradient(180deg, #f8fafc, #fff);
+}
+
+.student-side-card {
+  padding: 16px;
+}
+
+.student-side-card h2 {
+  margin-bottom: 8px;
+  font-size: 21px;
+}
+
+.student-side-card .empty-state {
+  padding: 12px;
+  text-align: left;
+}
+
+.student-schedules-page .student-schedule-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.student-schedule-panel {
+  min-width: 0;
+}
+
+.student-schedule-controls {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+  min-width: min(280px, 100%);
+}
+
+.student-schedule-controls label {
+  display: grid;
+  gap: 6px;
+  width: min(240px, 100%);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.student-schedule-controls select {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  padding: 0 10px;
+  font-weight: 800;
+}
+
+.pending-transcript-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #fbbf24;
+  border-radius: 8px;
+  background: #fffbeb;
+  padding: 14px;
+}
+
+.pending-transcript-panel h3,
+.pending-transcript-panel p {
+  margin: 0;
+}
+
+.pending-transcript-list {
+  display: grid;
+  gap: 10px;
+}
+
+.pending-transcript-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(251, 191, 36, 0.55);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.student-schedule-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.75fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.student-schedule-calendar,
+.student-schedule-form,
+.student-schedule-right {
+  min-width: 0;
+}
+
+.student-schedule-right {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.student-schedule-calendar {
+  position: relative;
+  display: grid;
+  gap: 10px;
+}
+
+.student-schedule-form {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f8fafc, #fff);
+  padding: 14px;
+}
+
+.student-schedule-form h3 {
+  margin: 0;
+}
+
+.student-schedule-form label {
+  display: grid;
+  gap: 6px;
+  font-weight: 800;
+}
+
+.form-row.two {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.student-schedule-form input,
+.student-schedule-form select,
+.student-schedule-form textarea {
+  font-weight: 600;
+}
+
+.schedule-help-text {
+  margin: 0;
+}
+
+.student-selected-schedule {
+  align-items: start;
+  background: #fff;
+}
+
+.selected-transcript-link {
+  width: 100%;
+}
+
+.selected-transcript-form {
+  width: 100%;
+  flex-basis: 100%;
+}
+
+.inline-loading {
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  right: 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 6px 10px;
+  box-shadow: var(--shadow);
+}
+
+.schedule-calendar-shell {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.schedule-calendar-shell .fc {
+  --fc-border-color: #e2e8f0;
+  --fc-page-bg-color: #fff;
+  --fc-neutral-bg-color: #f8fafc;
+  --fc-today-bg-color: rgba(37, 99, 235, 0.08);
+  --fc-now-indicator-color: #ef4444;
+  color: var(--text);
+  font-family: inherit;
+}
+
+.schedule-calendar-shell .fc .fc-toolbar {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.schedule-calendar-shell .fc .fc-toolbar-title {
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.schedule-calendar-shell .fc .fc-button {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-weight: 800;
+  box-shadow: none;
+}
+
+.schedule-calendar-shell .fc .fc-button-primary:not(:disabled).fc-button-active,
+.schedule-calendar-shell .fc .fc-button-primary:not(:disabled):active,
+.schedule-calendar-shell .fc .fc-button-primary:not(:disabled):hover {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.schedule-calendar-shell .fc .fc-col-header-cell-cushion,
+.schedule-calendar-shell .fc .fc-timegrid-slot-label-cushion {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.schedule-calendar-shell .fc .fc-timegrid-slot {
+  height: 34px;
+}
+
+.schedule-calendar-shell .fc .fc-timegrid-event {
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.schedule-calendar-shell .fc .fc-highlight {
+  background: rgba(37, 99, 235, 0.16);
+}
+
+.schedule-calendar-event {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 3px 5px;
+  line-height: 1.25;
+}
+
+.schedule-calendar-event strong,
+.schedule-calendar-event span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-calendar-event strong {
+  font-size: 12px;
+}
+
+.schedule-calendar-event span {
+  font-size: 11px;
+  opacity: 0.82;
+}
+
+.schedule-calendar-toolbar {
+  align-items: center;
+}
+
+.schedule-detail-card {
+  margin-top: 16px;
+}
+
+.schedule-detail-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.schedule-selected-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 12px;
+}
+
+.schedule-selected-actions .actions {
+  grid-column: 1 / -1;
 }
 
 .teacher-student-toolbar {
@@ -1858,6 +2601,7 @@ tr:last-child td {
   .workspace-grid,
   .student-profile,
   .student-summary-card,
+  .student-overview-card,
   .student-workspace-layout,
   .assignment-board {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1920,7 +2664,54 @@ tr:last-child td {
   }
 
   .student-workspace-layout,
+  .student-schedule-grid,
   .homework-card {
+    grid-template-columns: 1fr;
+  }
+
+  .student-homework-panel {
+    min-height: 0;
+  }
+
+  .homework-recent-item,
+  .homework-note-strip {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .homework-task-action {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  }
+
+  .homework-history-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .student-schedule-controls {
+    justify-items: stretch;
+    width: 100%;
+  }
+
+  .student-schedule-controls label {
+    width: 100%;
+  }
+
+  .pending-transcript-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .schedule-calendar-shell .fc .fc-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .schedule-selected-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .form-row.two {
     grid-template-columns: 1fr;
   }
 
@@ -1992,8 +2783,10 @@ tr:last-child td {
   .workspace-grid,
   .student-profile,
   .student-summary-card,
+  .student-overview-card,
   .student-metric-grid,
   .student-workspace-layout,
+  .student-schedule-grid,
   .homework-card,
   .student-placeholder-card,
   .assignment-board,
@@ -2005,6 +2798,40 @@ tr:last-child td {
   .metric-row,
   .demo-accounts {
     grid-template-columns: 1fr;
+  }
+
+  .student-overview-card {
+    padding: 16px;
+  }
+
+  .topbar-student {
+    align-items: flex-start;
+  }
+
+  .homework-task-action {
+    grid-template-columns: 1fr;
+  }
+
+  .homework-task-action .button {
+    width: 100%;
+  }
+
+  .homework-section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .student-profile-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .profile-missing-list {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .profile-missing-list div {
+    justify-content: flex-start;
   }
 
   .analytics-metric-grid {

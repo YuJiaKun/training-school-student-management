@@ -1,7 +1,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
+const VALID_STUDENT_LEARNING_STAGES = new Set(['studying', 'job_seeking', 'employed']);
 
 function createDatabase(options = {}) {
   const filePath = options.filePath || null;
@@ -95,7 +96,7 @@ function normalizeState(raw) {
   const students = normalizeStudents(raw.students || []);
   const homeworkAssignments = normalizeHomeworkAssignments(raw.homeworkAssignments || []);
   const homeworkRecords = normalizeHomeworkRecords(raw.homeworkRecords || []);
-  const interviewRecords = normalizeRecords(raw.interviewRecords || [], 'studentId');
+  const interviewRecords = normalizeInterviewRecords(raw.interviewRecords || []);
   const interviewSchedules = normalizeInterviewSchedules(raw.interviewSchedules || []);
   const authAccounts = normalizeAuthAccounts(raw.authAccounts || []);
   const classes = normalizeClasses(raw.classes || [], {
@@ -131,9 +132,11 @@ function normalizeStudents(students) {
     phone: student.phone || '',
     gender: student.gender || '',
     birthday: student.birthday || '',
+    graduationDate: student.graduationDate || '',
     className: student.className || '',
     enrolledAt: student.enrolledAt || '',
     status: student.status || 'active',
+    learningStage: VALID_STUDENT_LEARNING_STAGES.has(student.learningStage) ? student.learningStage : 'studying',
     archivedAt: student.archivedAt || null,
     remark: student.remark || ''
   })).filter((student) => Number.isInteger(student.id) && student.id > 0);
@@ -169,6 +172,21 @@ function normalizeRecords(records, numericKey) {
     id: Number(record.id),
     [numericKey]: Number(record[numericKey])
   })).filter((record) => Number.isInteger(record.id) && record.id > 0);
+}
+
+function normalizeInterviewRecords(records) {
+  return normalizeRecords(records, 'studentId').map((record) => ({
+    ...record,
+    scheduleId: record.scheduleId ? Number(record.scheduleId) : null,
+    teacherId: record.teacherId ? Number(record.teacherId) : null,
+    teacherName: record.teacherName || '',
+    scheduleStatus: record.scheduleStatus || '',
+    source: record.source || (record.scheduleId ? 'schedule' : 'manual'),
+    transcriptFileName: record.transcriptFileName || '',
+    transcriptFilePath: record.transcriptFilePath || '',
+    transcriptFileSize: record.transcriptFileSize ? Number(record.transcriptFileSize) : 0,
+    transcriptUploadedAt: record.transcriptUploadedAt || ''
+  }));
 }
 
 function normalizeInterviewSchedules(records) {

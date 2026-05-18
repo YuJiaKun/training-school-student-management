@@ -1,6 +1,9 @@
 export const STATUS_LABELS = {
   active: '在读',
   archived: '已归档',
+  studying: '学习中',
+  job_seeking: '求职中',
+  employed: '已就业',
   pending: '待处理',
   submitted: '已提交',
   reviewed: '已提交',
@@ -21,6 +24,9 @@ export const STATUS_LABELS = {
 export const TONE_BY_STATUS = {
   active: 'success',
   archived: 'muted',
+  studying: 'info',
+  job_seeking: 'warning',
+  employed: 'success',
   pending: 'warning',
   overduePending: 'danger',
   lateSubmitted: 'warning',

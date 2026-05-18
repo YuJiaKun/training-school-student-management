@@ -67,6 +67,7 @@ test('student lifecycle supports create, archive, query, stats, and export', () 
     gender: 'female',
     birthday: '2001-01-01',
     className: '前端1班',
+    learningStage: 'job_seeking',
     enrolledAt: '2026-05-01',
     remark: '认真'
   });
@@ -89,12 +90,16 @@ test('student lifecycle supports create, archive, query, stats, and export', () 
 
   assert.equal(app.listStudents({ status: 'active' }).items[0].name, 'Bob');
   assert.equal(app.listStudents({ status: 'archived' }).items[0].name, 'Alice');
+  assert.equal(alice.learningStage, 'job_seeking');
+  assert.equal(bob.learningStage, 'studying');
+  assert.equal(app.listStudents({ learningStage: 'job_seeking' }).items[0].name, 'Alice');
   const stats = app.getDashboardStats();
   assert.deepEqual(stats.students, { active: 1, archived: 1, total: 2 });
   assert.deepEqual(stats.homework, { total: 2, completed: 1 });
   assert.equal(stats.interviews.total, 2);
   assert.equal(stats.employmentRate, 50);
   assert.match(app.exportStudents({ status: 'active' }), /Bob/);
+  assert.match(app.exportStudents({ learningStage: 'job_seeking' }), /求职中/);
   assert.doesNotMatch(app.exportStudents({ status: 'active' }), /Alice/);
 });
 
@@ -114,6 +119,7 @@ test('student name and class are required while phone is optional', () => {
   assert.equal(student.name, 'Alice');
   assert.equal(student.className, '前端1班');
   assert.equal(student.phone, '');
+  assert.equal(student.learningStage, 'studying');
 });
 
 test('student api creates, updates, filters, and archives records over http', async () => {
@@ -124,21 +130,91 @@ test('student api creates, updates, filters, and archives records over http', as
     const created = await fetch(`${baseUrl}/api/students`, {
       method: 'POST',
       headers: jsonHeaders(cookie),
-      body: JSON.stringify({ name: 'Alice', phone: '13800000001', className: '前端1班', enrolledAt: '2026-05-01' })
+      body: JSON.stringify({ name: 'Alice', phone: '13800000001', className: '前端1班', enrolledAt: '2026-05-01', learningStage: 'studying' })
     }).then((response) => response.json());
 
     const updated = await fetch(`${baseUrl}/api/students/${created.student.id}`, {
       method: 'PATCH',
       headers: jsonHeaders(cookie),
-      body: JSON.stringify({ phone: '13900000001', remark: '已更新' })
+      body: JSON.stringify({ phone: '13900000001', remark: '已更新', learningStage: 'job_seeking' })
     }).then((response) => response.json());
 
     const filtered = await fetch(`${baseUrl}/api/students?keyword=13900000001`, { headers: { cookie } }).then((response) => response.json());
+    const stageFiltered = await fetch(`${baseUrl}/api/students?learningStage=job_seeking`, { headers: { cookie } }).then((response) => response.json());
     const archived = await fetch(`${baseUrl}/api/students/${created.student.id}/archive`, { method: 'POST', headers: { cookie } }).then((response) => response.json());
 
     assert.equal(updated.student.phone, '13900000001');
+    assert.equal(updated.student.learningStage, 'job_seeking');
     assert.equal(filtered.total, 1);
+    assert.equal(stageFiltered.total, 1);
     assert.equal(archived.student.status, 'archived');
+  });
+});
+
+test('student learning stage defaults, bulk updates, and teacher scoped edits are enforced', async () => {
+  const filePath = path.join(os.tmpdir(), `student-stage-${Date.now()}.json`);
+  fs.writeFileSync(filePath, JSON.stringify({
+    students: [{ id: 1, name: 'Legacy', className: 'Frontend', status: 'active' }],
+    nextStudentId: 2
+  }));
+  const db = createDatabase({ filePath });
+  const app = createApp({
+    db,
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'front-teacher', password: 'teacher123', role: 'teacher', teacherId: 1, classNames: ['Frontend', 'Data'] },
+      { username: 'java-teacher', password: 'teacher123', role: 'teacher', teacherId: 2, classNames: ['Java'] }
+    ]
+  });
+  app.createClass({ className: 'Frontend' });
+  app.createClass({ className: 'Data' });
+  app.createClass({ className: 'Java' });
+  const alice = db.students[0];
+  const bob = app.createStudent({ name: 'Bob', className: 'Frontend', learningStage: 'job_seeking' });
+  const charlie = app.createStudent({ name: 'Charlie', className: 'Java' });
+  app.archiveStudent(charlie.id);
+
+  assert.equal(alice.learningStage, 'studying');
+  assert.equal(bob.learningStage, 'job_seeking');
+  assert.equal(charlie.learningStage, 'studying');
+
+  await withServer(app, async (baseUrl) => {
+    const adminCookie = await loginAs(baseUrl);
+    const frontTeacherCookie = await loginAs(baseUrl, 'front-teacher', 'teacher123');
+    const javaTeacherCookie = await loginAs(baseUrl, 'java-teacher', 'teacher123');
+
+    const adminBulk = await fetch(`${baseUrl}/api/students/bulk-learning-stage`, {
+      method: 'POST',
+      headers: jsonHeaders(adminCookie),
+      body: JSON.stringify({ className: 'Frontend', learningStage: 'employed' })
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const teacherMove = await fetch(`${baseUrl}/api/teacher/students/${bob.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(frontTeacherCookie),
+      body: JSON.stringify({ className: 'Data', learningStage: 'job_seeking' })
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const forbiddenTeacherMove = await fetch(`${baseUrl}/api/teacher/students/${bob.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(javaTeacherCookie),
+      body: JSON.stringify({ className: 'Java', learningStage: 'studying' })
+    });
+    const forbiddenBulk = await fetch(`${baseUrl}/api/students/bulk-learning-stage`, {
+      method: 'POST',
+      headers: jsonHeaders(javaTeacherCookie),
+      body: JSON.stringify({ className: 'Frontend', learningStage: 'studying' })
+    });
+    const stageFiltered = await fetch(`${baseUrl}/api/students?learningStage=job_seeking`, {
+      headers: { cookie: adminCookie }
+    }).then((response) => response.json());
+
+    assert.equal(adminBulk.status, 200);
+    assert.equal(adminBulk.body.updatedCount, 2);
+    assert.equal(teacherMove.status, 200);
+    assert.equal(teacherMove.body.student.className, 'Data');
+    assert.equal(teacherMove.body.student.learningStage, 'job_seeking');
+    assert.equal(forbiddenTeacherMove.status, 403);
+    assert.equal(forbiddenBulk.status, 403);
+    assert.deepEqual(stageFiltered.items.map((student) => student.name), ['Bob']);
   });
 });
 
@@ -201,6 +277,74 @@ test('admins and teachers can create class options and teacher-created classes b
     assert.equal(emptyClass.status, 400);
     assert.equal(unauthorized.status, 401);
     assert.equal(forbidden.status, 403);
+  });
+});
+
+test('admins and teachers can delete only empty permitted classes', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'front-teacher', password: 'teacher123', role: 'teacher', teacherId: 1, classNames: ['Frontend'] },
+      { username: 'java-teacher', password: 'teacher123', role: 'teacher', teacherId: 2, classNames: ['Java'] }
+    ]
+  });
+  app.createClass({ className: 'Frontend' }, { role: 'admin', username: 'admin' });
+  app.createClass({ className: 'Java' }, { role: 'admin', username: 'admin' });
+  app.createClass({ className: 'Admin Empty' }, { role: 'admin', username: 'admin' });
+  app.createStudent({ name: 'Alice', className: 'Frontend' });
+  app.createHomeworkAssignment({ homeworkName: 'Java作业', className: 'Java' });
+
+  await withServer(app, async (baseUrl) => {
+    const adminCookie = await loginAs(baseUrl);
+    const frontCookie = await loginAs(baseUrl, 'front-teacher', 'teacher123');
+    const javaCookie = await loginAs(baseUrl, 'java-teacher', 'teacher123');
+    const teacherClass = await fetch(`${baseUrl}/api/classes`, {
+      method: 'POST',
+      headers: jsonHeaders(frontCookie),
+      body: JSON.stringify({ className: 'Teacher Empty' })
+    }).then((response) => response.json());
+    const classesBefore = await fetch(`${baseUrl}/api/classes`, {
+      headers: { cookie: adminCookie }
+    }).then((response) => response.json());
+    const frontendId = classesBefore.items.find((item) => item.className === 'Frontend').id;
+    const javaId = classesBefore.items.find((item) => item.className === 'Java').id;
+    const adminEmptyId = classesBefore.items.find((item) => item.className === 'Admin Empty').id;
+
+    const nonEmptyStudent = await fetch(`${baseUrl}/api/classes/${frontendId}`, {
+      method: 'DELETE',
+      headers: { cookie: adminCookie }
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const nonEmptyAssignment = await fetch(`${baseUrl}/api/classes/${javaId}`, {
+      method: 'DELETE',
+      headers: { cookie: adminCookie }
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const forbiddenTeacherDelete = await fetch(`${baseUrl}/api/classes/${teacherClass.class.id}`, {
+      method: 'DELETE',
+      headers: { cookie: javaCookie }
+    });
+    const teacherDelete = await fetch(`${baseUrl}/api/classes/${teacherClass.class.id}`, {
+      method: 'DELETE',
+      headers: { cookie: frontCookie }
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const adminDelete = await fetch(`${baseUrl}/api/classes/${adminEmptyId}`, {
+      method: 'DELETE',
+      headers: { cookie: adminCookie }
+    });
+    const classesAfter = await fetch(`${baseUrl}/api/classes`, {
+      headers: { cookie: adminCookie }
+    }).then((response) => response.json());
+
+    assert.equal(nonEmptyStudent.status, 400);
+    assert.equal(nonEmptyStudent.body.error, 'class has active students');
+    assert.equal(nonEmptyAssignment.status, 400);
+    assert.equal(nonEmptyAssignment.body.error, 'class has active homework assignments');
+    assert.equal(forbiddenTeacherDelete.status, 403);
+    assert.equal(teacherDelete.status, 200);
+    assert.equal(teacherDelete.body.class.className, 'Teacher Empty');
+    assert.equal(adminDelete.status, 200);
+    assert.equal(classesAfter.items.some((item) => item.className === 'Teacher Empty'), false);
+    assert.equal(classesAfter.items.some((item) => item.className === 'Admin Empty'), false);
   });
 });
 
@@ -504,7 +648,7 @@ test('homework records and assignment stats exclude archived students by default
       { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, classNames: ['Frontend'] }
     ]
   });
-  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend' });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend', learningStage: 'job_seeking' });
   const assignment = app.createHomeworkAssignment({
     homeworkName: 'Archive Check',
     className: 'Frontend'
@@ -905,7 +1049,7 @@ test('role permissions protect admin apis and teacher schedule ownership', async
   });
 });
 
-test('teacher scheduling participation remains configurable while student requests are deferred', async () => {
+test('teacher scheduling participation gates student calendar requests', async () => {
   const app = createApp({
     db: createDatabase(),
     authAccounts: [
@@ -915,7 +1059,7 @@ test('teacher scheduling participation remains configurable while student reques
       { username: 'student-a', password: 'student123', role: 'student', studentId: 1 }
     ]
   });
-  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend' });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend', learningStage: 'job_seeking' });
 
   await withServer(app, async (baseUrl) => {
     const adminCookie = await loginAs(baseUrl);
@@ -941,15 +1085,15 @@ test('teacher scheduling participation remains configurable while student reques
       method: 'POST',
       headers: jsonHeaders(studentCookie),
       body: JSON.stringify({
-        studentId: alice.id,
+        studentId: 999,
         teacherId: 2,
         teacherName: 'Teacher On',
         companyName: 'B Corp',
         positionName: 'Frontend Engineer',
-        startsAt: '2026-05-18T10:00:00',
-        endsAt: '2026-05-18T10:30:00'
+        startsAt: '2099-05-18T10:00:00',
+        endsAt: '2099-05-18T11:00:00'
       })
-    });
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
 
     const schedulingPatch = await fetch(`${baseUrl}/api/teacher-workspace/scheduling`, {
       method: 'PATCH',
@@ -961,10 +1105,72 @@ test('teacher scheduling participation remains configurable while student reques
     assert.deepEqual(studentTeachersBefore.items.map((teacher) => teacher.id), [2]);
     assert.equal(adminTeachers.items.find((teacher) => teacher.id === 1).participatesInScheduling, false);
     assert.equal(adminTeachers.items.find((teacher) => teacher.id === 2).participatesInScheduling, true);
-    assert.equal(blockedRequest.status, 403);
-    assert.equal(allowedRequest.status, 403);
+    assert.equal(blockedRequest.status, 400);
+    assert.equal(allowedRequest.status, 201);
+    assert.equal(allowedRequest.body.schedule.status, 'requested');
+    assert.equal(allowedRequest.body.schedule.studentId, alice.id);
     assert.equal(schedulingPatch.teacher.participatesInScheduling, true);
     assert.deepEqual(studentTeachersAfter.items.map((teacher) => teacher.id).sort(), [1, 2]);
+  });
+});
+
+test('student schedule requests require active job seeking students', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, teacherName: 'Teacher A', participatesInScheduling: true },
+      { username: 'student-study', password: 'student123', role: 'student', studentId: 1 },
+      { username: 'student-employed', password: 'student123', role: 'student', studentId: 2 },
+      { username: 'student-archived', password: 'student123', role: 'student', studentId: 3 },
+      { username: 'student-job', password: 'student123', role: 'student', studentId: 4 }
+    ],
+    teachers: [{ id: 1, name: 'Teacher A' }]
+  });
+  const studying = app.createStudent({ name: 'Studying', className: 'Frontend' });
+  const employed = app.createStudent({ name: 'Employed', className: 'Frontend', learningStage: 'employed' });
+  const archived = app.createStudent({ name: 'Archived', className: 'Frontend', learningStage: 'job_seeking' });
+  const jobSeeking = app.createStudent({ name: 'Job Seeking', className: 'Frontend', learningStage: 'job_seeking' });
+  app.archiveStudent(archived.id);
+
+  async function requestSchedule(baseUrl, cookie, startsAt) {
+    return fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({
+        teacherId: 1,
+        teacherName: 'Teacher A',
+        companyName: 'Stage Co',
+        positionName: 'Frontend Engineer',
+        startsAt,
+        endsAt: startsAt.replace('09:00:00', '10:00:00')
+      })
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+  }
+
+  await withServer(app, async (baseUrl) => {
+    const studyingCookie = await loginAs(baseUrl, 'student-study', 'student123');
+    const employedCookie = await loginAs(baseUrl, 'student-employed', 'student123');
+    const archivedCookie = await loginAs(baseUrl, 'student-archived', 'student123');
+    const jobCookie = await loginAs(baseUrl, 'student-job', 'student123');
+    const studyingWorkspace = await fetch(`${baseUrl}/api/student-workspace`, {
+      headers: { cookie: studyingCookie }
+    }).then((response) => response.json());
+
+    const studyingRequest = await requestSchedule(baseUrl, studyingCookie, '2099-06-01T09:00:00');
+    const employedRequest = await requestSchedule(baseUrl, employedCookie, '2099-06-02T09:00:00');
+    const archivedRequest = await requestSchedule(baseUrl, archivedCookie, '2099-06-03T09:00:00');
+    const jobRequest = await requestSchedule(baseUrl, jobCookie, '2099-06-04T09:00:00');
+
+    assert.equal(studying.learningStage, 'studying');
+    assert.equal(studyingWorkspace.scheduleGuard.canRequest, false);
+    assert.equal(studyingWorkspace.scheduleGuard.reason, 'student not eligible for scheduling');
+    assert.equal(studyingRequest.status, 400);
+    assert.equal(employedRequest.status, 400);
+    assert.equal(archivedRequest.status, 400);
+    assert.equal(jobSeeking.learningStage, 'job_seeking');
+    assert.equal(jobRequest.status, 201);
+    assert.equal(jobRequest.body.schedule.studentId, jobSeeking.id);
   });
 });
 
@@ -1033,16 +1239,17 @@ test('teachers can approve reject and filter their own interview schedules', asy
   });
 });
 
-test('student workspace only returns learning data and student scheduling is deferred', async () => {
+test('student workspace returns learning data and schedule guard without exposing all students', async () => {
   const db = createDatabase();
   const studentApp = createApp({
     db,
     authAccounts: [
       { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, teacherName: '张老师', participatesInScheduling: true },
       { username: 'student-a', password: 'student123', role: 'student', studentId: 1 }
     ]
   });
-  const alice = studentApp.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const alice = studentApp.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班', learningStage: 'job_seeking' });
   const bob = studentApp.createStudent({ name: 'Bob', phone: '13800000002', className: '前端1班' });
   studentApp.addHomeworkRecord({ studentId: alice.id, homeworkName: 'HTML作业', submitStatus: 'submitted' });
   studentApp.addHomeworkRecord({ studentId: bob.id, homeworkName: 'SQL作业', submitStatus: 'pending' });
@@ -1061,8 +1268,8 @@ test('student workspace only returns learning data and student scheduling is def
         teacherName: '张老师',
         companyName: 'B公司',
         positionName: '测试工程师',
-        startsAt: '2026-05-18T10:00:00',
-        endsAt: '2026-05-18T10:30:00'
+        startsAt: '2099-05-18T10:00:00',
+        endsAt: '2099-05-18T10:30:00'
       })
     });
     const ownSchedule = await fetch(`${baseUrl}/api/schedules`, {
@@ -1074,19 +1281,20 @@ test('student workspace only returns learning data and student scheduling is def
         teacherName: '张老师',
         companyName: 'A公司',
         positionName: '前端工程师',
-        startsAt: '2026-05-18T11:00:00',
-        endsAt: '2026-05-18T11:30:00'
+        startsAt: '2099-05-18T11:00:00',
+        endsAt: '2099-05-18T12:00:00'
       })
-    });
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
 
     assert.equal(workspace.student.id, alice.id);
     assert.equal(workspace.homeworkRecords.length, 1);
     assert.equal(workspace.interviewRecords.length, 1);
-    assert.equal(Object.hasOwn(workspace, 'schedules'), false);
-    assert.equal(Object.hasOwn(workspace, 'scheduleGuard'), false);
+    assert.equal(workspace.scheduleGuard.canRequest, true);
+    assert.equal(workspace.scheduleGuard.unfinishedCount, 0);
     assert.equal(students.status, 403);
-    assert.equal(otherSchedule.status, 403);
-    assert.equal(ownSchedule.status, 403);
+    assert.equal(otherSchedule.status, 201);
+    assert.equal(ownSchedule.status, 201);
+    assert.equal(ownSchedule.body.schedule.studentId, alice.id);
   });
 });
 
@@ -1237,7 +1445,113 @@ test('cancelled schedules do not block the same time slot', () => {
   assert.equal(second.teacherId, 1);
 });
 
-test('student weekly schedule view is deferred', async () => {
+test('student weekly schedule view redacts classmates and supports own requests', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, teacherName: 'Teacher A', participatesInScheduling: true },
+      { username: 'teacher-b', password: 'teacher123', role: 'teacher', teacherId: 2, teacherName: 'Teacher B', participatesInScheduling: true },
+      { username: 'teacher-off', password: 'teacher123', role: 'teacher', teacherId: 3, teacherName: 'Teacher Off', participatesInScheduling: false },
+      { username: 'student-a', password: 'student123', role: 'student', studentId: 1 },
+      { username: 'student-b', password: 'student123', role: 'student', studentId: 2 }
+    ],
+    teachers: [
+      { id: 1, name: 'Teacher A' },
+      { id: 2, name: 'Teacher B' },
+      { id: 3, name: 'Teacher Off' }
+    ]
+  });
+  const alice = app.createStudent({ name: 'Alice', className: 'Frontend', learningStage: 'job_seeking' });
+  const bob = app.createStudent({ name: 'Bob', className: 'Frontend', learningStage: 'job_seeking' });
+  app.createInterviewSchedule({
+    studentId: alice.id,
+    teacherId: 1,
+    teacherName: 'Teacher A',
+    companyName: 'Alice Co',
+    positionName: 'Frontend Engineer',
+    startsAt: '2099-05-18T09:00:00',
+    endsAt: '2099-05-18T09:30:00',
+    status: 'confirmed'
+  });
+  app.createInterviewSchedule({
+    studentId: bob.id,
+    teacherId: 1,
+    teacherName: 'Teacher A',
+    companyName: 'Bob Co',
+    positionName: 'Backend Engineer',
+    startsAt: '2099-05-19T10:00:00',
+    endsAt: '2099-05-19T10:30:00',
+    status: 'confirmed'
+  });
+  app.createInterviewSchedule({
+    studentId: bob.id,
+    teacherId: 2,
+    teacherName: 'Teacher B',
+    companyName: 'Teacher B Co',
+    positionName: 'Data Engineer',
+    startsAt: '2099-05-19T14:00:00',
+    endsAt: '2099-05-19T14:30:00',
+    status: 'confirmed'
+  });
+  app.createInterviewSchedule({
+    studentId: bob.id,
+    teacherId: 3,
+    teacherName: 'Teacher Off',
+    companyName: 'Hidden Co',
+    positionName: 'QA Engineer',
+    startsAt: '2099-05-19T15:00:00',
+    endsAt: '2099-05-19T15:30:00',
+    status: 'confirmed'
+  });
+
+  await withServer(app, async (baseUrl) => {
+    const studentCookie = await loginAs(baseUrl, 'student-a', 'student123');
+    const request = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(studentCookie),
+      body: JSON.stringify({
+        studentId: bob.id,
+        teacherId: 1,
+        teacherName: 'Teacher A',
+        companyName: 'Alice Request Co',
+        positionName: 'Frontend Engineer',
+        startsAt: '2099-05-20T09:00:00',
+        endsAt: '2099-05-20T10:00:00'
+      })
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const weekly = await fetch(`${baseUrl}/api/student-workspace/schedules/week?weekStart=2099-05-18`, {
+      headers: { cookie: studentCookie }
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const teacherFiltered = await fetch(`${baseUrl}/api/student-workspace/schedules/week?weekStart=2099-05-18&teacherId=2`, {
+      headers: { cookie: studentCookie }
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const unavailableTeacher = await fetch(`${baseUrl}/api/student-workspace/schedules/week?weekStart=2099-05-18&teacherId=3`, {
+      headers: { cookie: studentCookie }
+    });
+    const scheduleList = await fetch(`${baseUrl}/api/schedules`, {
+      headers: { cookie: studentCookie }
+    });
+
+    assert.equal(request.status, 201);
+    assert.equal(request.body.schedule.studentId, alice.id);
+    assert.equal(request.body.schedule.status, 'requested');
+    assert.equal(weekly.status, 200);
+    assert.equal(weekly.body.entries.length, 4);
+    assert.equal(weekly.body.entries.find((entry) => entry.companyName === 'Alice Co').studentName, 'Alice');
+    assert.equal(weekly.body.entries.find((entry) => entry.companyName === 'Bob Co').studentName, '');
+    assert.equal(weekly.body.entries.find((entry) => entry.companyName === 'Alice Request Co').isOwn, true);
+    assert.equal(weekly.body.entries.some((entry) => entry.companyName === 'Hidden Co'), false);
+    assert.equal(teacherFiltered.status, 200);
+    assert.deepEqual(teacherFiltered.body.entries.map((entry) => entry.teacherId), [2]);
+    assert.equal(teacherFiltered.body.entries[0].studentName, '');
+    assert.equal(unavailableTeacher.status, 403);
+    assert.equal(scheduleList.status, 403);
+    assert.equal(bob.id, 2);
+  });
+});
+
+test('student schedule requests enforce slot rules conflicts and owner cancellation', async () => {
   const app = createApp({
     db: createDatabase(),
     authAccounts: [
@@ -1248,108 +1562,88 @@ test('student weekly schedule view is deferred', async () => {
     ],
     teachers: [{ id: 1, name: 'Teacher A' }]
   });
-  const alice = app.createStudent({ name: 'Alice', className: 'Frontend' });
-  const bob = app.createStudent({ name: 'Bob', className: 'Frontend' });
-  app.createInterviewSchedule({
-    studentId: alice.id,
-    teacherId: 1,
-    teacherName: 'Teacher A',
-    companyName: 'Alice Co',
-    positionName: 'Frontend Engineer',
-    startsAt: '2026-05-18T09:00:00',
-    endsAt: '2026-05-18T09:30:00',
-    status: 'confirmed'
-  });
-  app.createInterviewSchedule({
-    studentId: bob.id,
-    teacherId: 1,
-    teacherName: 'Teacher A',
-    companyName: 'Bob Co',
-    positionName: 'Backend Engineer',
-    startsAt: '2026-05-19T10:00:00',
-    endsAt: '2026-05-19T10:30:00',
-    status: 'confirmed'
-  });
+  const alice = app.createStudent({ name: 'Alice', className: 'Frontend', learningStage: 'job_seeking' });
+  const bob = app.createStudent({ name: 'Bob', className: 'Frontend', learningStage: 'job_seeking' });
 
   await withServer(app, async (baseUrl) => {
-    const studentCookie = await loginAs(baseUrl, 'student-a', 'student123');
-    const weekly = await fetch(`${baseUrl}/api/student-workspace/schedules/week?weekStart=2026-05-18`, {
-      headers: { cookie: studentCookie }
-    });
-    const scheduleList = await fetch(`${baseUrl}/api/schedules`, {
-      headers: { cookie: studentCookie }
-    });
-    const request = await fetch(`${baseUrl}/api/schedules`, {
+    const aliceCookie = await loginAs(baseUrl, 'student-a', 'student123');
+    const bobCookie = await loginAs(baseUrl, 'student-b', 'student123');
+    const baseRequest = {
+      studentId: bob.id,
+      teacherId: 1,
+      teacherName: 'Teacher A',
+      companyName: 'Calendar Co',
+      positionName: 'Frontend Engineer'
+    };
+    const valid = await fetch(`${baseUrl}/api/schedules`, {
       method: 'POST',
-      headers: jsonHeaders(studentCookie),
+      headers: jsonHeaders(aliceCookie),
       body: JSON.stringify({
-        studentId: alice.id,
-        teacherId: 1,
-        teacherName: 'Teacher A',
-        companyName: 'Alice Co',
-        positionName: 'Frontend Engineer',
-        startsAt: '2026-05-20T09:00:00',
-        endsAt: '2026-05-20T09:30:00'
+        ...baseRequest,
+        startsAt: '2099-05-21T09:00:00',
+        endsAt: '2099-05-21T10:00:00'
+      })
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const unaligned = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(aliceCookie),
+      body: JSON.stringify({
+        ...baseRequest,
+        startsAt: '2099-05-21T10:15:00',
+        endsAt: '2099-05-21T11:15:00'
       })
     });
+    const tooLong = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(aliceCookie),
+      body: JSON.stringify({
+        ...baseRequest,
+        startsAt: '2099-05-21T11:00:00',
+        endsAt: '2099-05-21T13:30:00'
+      })
+    });
+    const past = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(aliceCookie),
+      body: JSON.stringify({
+        ...baseRequest,
+        startsAt: '2020-05-21T09:00:00',
+        endsAt: '2020-05-21T10:00:00'
+      })
+    });
+    const conflict = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(bobCookie),
+      body: JSON.stringify({
+        ...baseRequest,
+        studentId: bob.id,
+        startsAt: '2099-05-21T09:30:00',
+        endsAt: '2099-05-21T10:30:00'
+      })
+    });
+    const forbiddenCancel = await fetch(`${baseUrl}/api/schedules/${valid.body.schedule.id}/cancel`, {
+      method: 'POST',
+      headers: { cookie: bobCookie }
+    });
+    const cancelled = await fetch(`${baseUrl}/api/schedules/${valid.body.schedule.id}/cancel`, {
+      method: 'POST',
+      headers: { cookie: aliceCookie }
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
 
-    assert.equal(weekly.status, 403);
-    assert.equal(scheduleList.status, 403);
-    assert.equal(request.status, 403);
-    assert.equal(bob.id, 2);
+    assert.equal(valid.status, 201);
+    assert.equal(valid.body.schedule.studentId, alice.id);
+    assert.equal(unaligned.status, 400);
+    assert.equal(tooLong.status, 400);
+    assert.equal(past.status, 400);
+    assert.equal(conflict.status, 400);
+    assert.equal(forbiddenCancel.status, 403);
+    assert.equal(cancelled.status, 200);
+    assert.equal(cancelled.body.schedule.status, 'cancelled');
   });
 });
 
-test('student workspace omits schedule guard while scheduling is deferred', async () => {
-  const app = createApp({
-    db: createDatabase(),
-    authAccounts: [
-      { username: 'admin', password: 'admin123', role: 'admin' },
-      { username: 'teacher', password: 'teacher123', role: 'teacher', teacherId: 1, teacherName: 'Teacher A', participatesInScheduling: true },
-      { username: 'student', password: 'student123', role: 'student', studentId: 1 }
-    ],
-    teachers: [{ id: 1, name: 'Teacher A' }]
-  });
-  const alice = app.createStudent({ name: 'Alice', className: 'Frontend' });
-  app.createInterviewSchedule({
-    studentId: alice.id,
-    teacherId: 1,
-    teacherName: 'Teacher A',
-    companyName: 'Deferred Co',
-    positionName: 'Frontend Engineer',
-    startsAt: '2026-05-21T09:00:00',
-    endsAt: '2026-05-21T09:30:00',
-    status: 'confirmed'
-  });
-
-  await withServer(app, async (baseUrl) => {
-    const studentCookie = await loginAs(baseUrl, 'student', 'student123');
-    const workspace = await fetch(`${baseUrl}/api/student-workspace`, {
-      headers: { cookie: studentCookie }
-    }).then((response) => response.json());
-    const request = await fetch(`${baseUrl}/api/schedules`, {
-      method: 'POST',
-      headers: jsonHeaders(studentCookie),
-      body: JSON.stringify({
-        studentId: alice.id,
-        teacherId: 1,
-        teacherName: 'Teacher A',
-        startsAt: '2026-05-22T09:00:00',
-        endsAt: '2026-05-22T09:30:00'
-      })
-    });
-
-    assert.equal(workspace.student.id, alice.id);
-    assert.equal(Object.hasOwn(workspace, 'schedules'), false);
-    assert.equal(Object.hasOwn(workspace, 'scheduleGuard'), false);
-    assert.equal(request.status, 403);
-  });
-});
-
-test('student transcript upload is deferred and staff can download existing transcripts', async () => {
+test('student uploads completed interview transcript before requesting another schedule', async () => {
   const uploadRoot = createUploadRoot();
-  const transcriptPath = path.join(uploadRoot, 'existing-transcript.txt');
-  fs.writeFileSync(transcriptPath, 'Alice transcript');
   const app = createApp({
     db: createDatabase(),
     uploadRoot,
@@ -1361,8 +1655,8 @@ test('student transcript upload is deferred and staff can download existing tran
     ],
     teachers: [{ id: 1, name: 'Teacher A' }]
   });
-  const alice = app.createStudent({ name: 'Alice', className: 'Frontend' });
-  const bob = app.createStudent({ name: 'Bob', className: 'Frontend' });
+  const alice = app.createStudent({ name: 'Alice', className: 'Frontend', learningStage: 'job_seeking' });
+  const bob = app.createStudent({ name: 'Bob', className: 'Frontend', learningStage: 'job_seeking' });
   const completed = app.createInterviewSchedule({
     studentId: alice.id,
     teacherId: 1,
@@ -1371,11 +1665,17 @@ test('student transcript upload is deferred and staff can download existing tran
     positionName: 'Frontend Engineer',
     startsAt: '2026-05-18T09:00:00',
     endsAt: '2026-05-18T09:30:00',
-    status: 'completed',
-    transcriptFileName: 'alice-transcript.txt',
-    transcriptFilePath: transcriptPath,
-    transcriptFileSize: 'Alice transcript'.length,
-    transcriptUploadedAt: '2026-05-18T10:00:00'
+    status: 'completed'
+  });
+  const requested = app.createInterviewSchedule({
+    studentId: alice.id,
+    teacherId: 1,
+    teacherName: 'Teacher A',
+    companyName: 'Pending Co',
+    positionName: 'Frontend Engineer',
+    startsAt: '2026-05-19T09:00:00',
+    endsAt: '2026-05-19T09:30:00',
+    status: 'requested'
   });
 
   await withServer(app, async (baseUrl) => {
@@ -1384,18 +1684,66 @@ test('student transcript upload is deferred and staff can download existing tran
     const studentCookie = await loginAs(baseUrl, 'student-a', 'student123');
     const otherStudentCookie = await loginAs(baseUrl, 'student-b', 'student123');
 
+    const workspaceBefore = await fetch(`${baseUrl}/api/student-workspace`, {
+      headers: { cookie: studentCookie }
+    }).then((response) => response.json());
+    const blockedRequest = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(studentCookie),
+      body: JSON.stringify({
+        teacherId: 1,
+        teacherName: 'Teacher A',
+        startsAt: '2099-05-22T09:00:00',
+        endsAt: '2099-05-22T09:30:00'
+      })
+    });
+    const forbiddenUpload = new FormData();
+    forbiddenUpload.append('file', new Blob(['Bob transcript'], { type: 'text/plain' }), 'bob-transcript.txt');
+    const otherStudentUpload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, {
+      method: 'POST',
+      headers: { cookie: otherStudentCookie },
+      body: forbiddenUpload
+    });
+    const pendingUpload = new FormData();
+    pendingUpload.append('file', new Blob(['Pending transcript'], { type: 'text/plain' }), 'pending-transcript.txt');
+    const incompleteUpload = await fetch(`${baseUrl}/api/schedules/${requested.id}/transcript`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: pendingUpload
+    });
+    const wrongType = new FormData();
+    wrongType.append('file', new Blob(['PDF content'], { type: 'application/pdf' }), 'alice-transcript.pdf');
+    const invalidTypeUpload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: wrongType
+    });
     const transcript = new FormData();
     transcript.append('file', new Blob(['Alice transcript'], { type: 'text/plain' }), 'alice-transcript.txt');
-    const deferredUpload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, {
+    const uploaded = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, {
       method: 'POST',
       headers: { cookie: studentCookie },
       body: transcript
-    });
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const replacementTranscript = new FormData();
+    replacementTranscript.append('file', new Blob(['Alice transcript updated'], { type: 'text/plain' }), 'alice-transcript-updated.txt');
+    const uploadedAgain = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, {
+      method: 'POST',
+      headers: { cookie: studentCookie },
+      body: replacementTranscript
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
 
     const teacherDownload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, { headers: { cookie: teacherCookie } });
     const adminDownload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, { headers: { cookie: adminCookie } });
     const studentDownload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, { headers: { cookie: studentCookie } });
     const otherStudentDownload = await fetch(`${baseUrl}/api/schedules/${completed.id}/transcript`, { headers: { cookie: otherStudentCookie } });
+    const adminInterviews = await fetch(`${baseUrl}/api/interviews`, { headers: { cookie: adminCookie } })
+      .then(async (response) => ({ status: response.status, body: await response.json() }));
+    const syncedInterview = adminInterviews.body.items.find((record) => Number(record.scheduleId) === Number(completed.id));
+    const interviewDownload = await fetch(`${baseUrl}/api/interviews/${syncedInterview?.id || 0}/transcript`, { headers: { cookie: adminCookie } });
+    const interviewCsv = await fetch(`${baseUrl}/api/export/interviews`, { headers: { cookie: adminCookie } }).then((response) => response.text());
+    const interviewZipResponse = await fetch(`${baseUrl}/api/export/interviews.zip`, { headers: { cookie: adminCookie } });
+    const interviewZip = Buffer.from(await interviewZipResponse.arrayBuffer());
     const nextRequest = await fetch(`${baseUrl}/api/schedules`, {
       method: 'POST',
       headers: jsonHeaders(studentCookie),
@@ -1407,15 +1755,47 @@ test('student transcript upload is deferred and staff can download existing tran
         endsAt: '2026-05-22T09:30:00'
       })
     });
+    const workspaceAfter = await fetch(`${baseUrl}/api/student-workspace`, {
+      headers: { cookie: studentCookie }
+    }).then((response) => response.json());
 
-    assert.equal(deferredUpload.status, 403);
-    assert.equal(await teacherDownload.text(), 'Alice transcript');
-    assert.equal(await adminDownload.text(), 'Alice transcript');
+    assert.equal(workspaceBefore.scheduleGuard.canRequest, false);
+    assert.equal(workspaceBefore.scheduleGuard.reason, 'interview transcript required');
+    assert.equal(blockedRequest.status, 400);
+    assert.equal(otherStudentUpload.status, 403);
+    assert.equal(incompleteUpload.status, 400);
+    assert.equal(invalidTypeUpload.status, 400);
+    assert.equal(uploaded.status, 200);
+    assert.equal(uploadedAgain.status, 200);
+    assert.equal(uploaded.body.schedule.transcriptFileName, 'alice-transcript.txt');
+    assert.equal(uploadedAgain.body.schedule.transcriptFileName, 'alice-transcript-updated.txt');
+    assert.ok(uploadedAgain.body.schedule.transcriptFilePath);
+    assert.equal(uploaded.body.schedule.transcriptFileSize, 'Alice transcript'.length);
+    assert.ok(uploadedAgain.body.schedule.transcriptUploadedAt);
+    assert.equal(await teacherDownload.text(), 'Alice transcript updated');
+    assert.equal(await adminDownload.text(), 'Alice transcript updated');
+    assert.equal(await studentDownload.text(), 'Alice transcript updated');
     assert.equal(teacherDownload.headers.get('content-type'), 'text/plain; charset=utf-8');
-    assert.equal(studentDownload.status, 403);
     assert.equal(otherStudentDownload.status, 403);
-    assert.equal(nextRequest.status, 403);
-    assert.equal(fs.readFileSync(transcriptPath, 'utf8'), 'Alice transcript');
+    assert.equal(adminInterviews.status, 200);
+    assert.ok(syncedInterview);
+    assert.equal(syncedInterview.studentId, alice.id);
+    assert.equal(syncedInterview.teacherName, 'Teacher A');
+    assert.equal(syncedInterview.companyName, 'Transcript Co');
+    assert.equal(syncedInterview.positionName, 'Frontend Engineer');
+    assert.equal(syncedInterview.interviewAt, '2026-05-18T09:00:00');
+    assert.equal(syncedInterview.source, 'schedule');
+    assert.equal(syncedInterview.transcriptFileName, 'alice-transcript-updated.txt');
+    assert.equal(adminInterviews.body.items.filter((record) => Number(record.scheduleId) === Number(completed.id)).length, 1);
+    assert.equal(await interviewDownload.text(), 'Alice transcript updated');
+    assert.match(interviewCsv, /alice-transcript-updated\.txt/);
+    assert.match(interviewCsv, /排期同步/);
+    assert.equal(interviewZipResponse.headers.get('content-type'), 'application/zip');
+    assert.match(interviewZip.toString('utf8'), /alice-transcript-updated\.txt/);
+    assert.match(interviewZip.toString('utf8'), /面试记录清单\.csv/);
+    assert.equal(nextRequest.status, 201);
+    assert.equal(workspaceAfter.scheduleGuard.canRequest, true);
+    assert.equal(workspaceAfter.scheduleGuard.pendingTranscriptSchedules.length, 0);
     assert.equal(bob.id, 2);
   });
 });
@@ -1516,6 +1896,7 @@ test('schedule state machine rejects invalid and terminal transitions', () => {
 test('admin schedule creation confirms immediately and teachers are exposed over http', async () => {
   const app = createApp({ db: createDatabase() });
   const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '前端1班' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: '前端1班' });
 
   await withServer(app, async (baseUrl) => {
     const cookie = await loginAs(baseUrl);
@@ -1532,10 +1913,43 @@ test('admin schedule creation confirms immediately and teachers are exposed over
         endsAt: '2026-05-18T09:30:00'
       })
     }).then((response) => response.json());
+    const other = await fetch(`${baseUrl}/api/schedules`, {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({
+        studentId: bob.id,
+        teacherId: 1,
+        teacherName: '张老师',
+        companyName: 'B公司',
+        positionName: '测试工程师',
+        startsAt: '2026-05-18T10:00:00',
+        endsAt: '2026-05-18T11:00:00'
+      })
+    }).then((response) => response.json());
+    const conflictPatch = await fetch(`${baseUrl}/api/schedules/${created.schedule.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({
+        startsAt: '2026-05-18T10:30:00',
+        endsAt: '2026-05-18T11:30:00'
+      })
+    });
+    const moved = await fetch(`${baseUrl}/api/schedules/${created.schedule.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(cookie),
+      body: JSON.stringify({
+        startsAt: '2026-05-18T11:30:00',
+        endsAt: '2026-05-18T12:30:00'
+      })
+    }).then((response) => response.json());
     const teachers = await fetch(`${baseUrl}/api/teachers`, { headers: { cookie } }).then((response) => response.json());
 
     assert.equal(created.schedule.status, 'confirmed');
     assert.equal(created.schedule.confirmedByRole, 'admin');
+    assert.equal(other.schedule.status, 'confirmed');
+    assert.equal(conflictPatch.status, 400);
+    assert.equal(moved.schedule.status, 'rescheduled');
+    assert.equal(moved.schedule.startsAt, '2026-05-18T11:30:00');
     assert.equal(teachers.items[0].id, 1);
     assert.equal(teachers.items[0].name, '张老师');
     assert.equal(teachers.items[0].participatesInScheduling, false);
@@ -1594,13 +2008,13 @@ test('database saves with schema version, backup, and explicit damaged file erro
   }));
 
   const db = createDatabase({ filePath });
-  assert.equal(db.schemaVersion, 4);
+  assert.equal(db.schemaVersion, 5);
   assert.equal(db.students[0].status, 'active');
 
   db.save();
   const saved = JSON.parse(fs.readFileSync(filePath, 'utf8'));
 
-  assert.equal(saved.schemaVersion, 4);
+  assert.equal(saved.schemaVersion, 5);
   assert.equal(fs.existsSync(`${filePath}.tmp`), false);
   assert.equal(fs.existsSync(`${filePath}.bak`), true);
 
@@ -1798,7 +2212,7 @@ test('students can complete optional profile fields without changing identity or
         status: 'archived',
         phone: '13800000003',
         gender: '女',
-        birthday: '2001-01-01',
+        graduationDate: '2026-07-01',
         enrolledAt: '2026-05-01',
         remark: '自己补全'
       })
@@ -1825,7 +2239,7 @@ test('students can complete optional profile fields without changing identity or
     assert.equal(updated.student.status, 'active');
     assert.equal(updated.student.phone, '13800000003');
     assert.equal(updated.student.gender, '女');
-    assert.equal(updated.student.birthday, '2001-01-01');
+    assert.equal(updated.student.graduationDate, '2026-07-01');
     assert.equal(updated.student.enrolledAt, '2026-05-01');
     assert.equal(updated.student.remark, '自己补全');
     assert.equal(duplicatePhone.status, 400);
@@ -1925,6 +2339,63 @@ test('student account management endpoints are admin only', async () => {
     assert.equal(teacherGenerate.status, 403);
     assert.equal(teacherReset.status, 403);
     assert.equal(studentExport.status, 403);
+  });
+});
+
+test('teachers can reset and export passwords only for their managed class students', async () => {
+  const app = createApp({
+    db: createDatabase(),
+    authAccounts: [
+      { username: 'admin', password: 'admin123', role: 'admin' },
+      { username: 'front-teacher', password: 'teacher123', role: 'teacher', teacherId: 1, classNames: ['Frontend'] },
+      { username: 'java-teacher', password: 'teacher123', role: 'teacher', teacherId: 2, classNames: ['Java'] }
+    ]
+  });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: 'Frontend' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: 'Java' });
+  const generated = app.generateStudentAccounts({ studentIds: [alice.id, bob.id] });
+  const aliceAccount = generated.accounts.find((account) => Number(account.studentId) === Number(alice.id));
+
+  await withServer(app, async (baseUrl) => {
+    const frontCookie = await loginAs(baseUrl, 'front-teacher', 'teacher123');
+    const javaCookie = await loginAs(baseUrl, 'java-teacher', 'teacher123');
+    const oldPasswordLogin = await fetch(`${baseUrl}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: aliceAccount.username, password: aliceAccount.initialPassword })
+    });
+    const forbiddenClass = await fetch(`${baseUrl}/api/teacher/students/accounts/reset`, {
+      method: 'POST',
+      headers: jsonHeaders(javaCookie),
+      body: JSON.stringify({ className: 'Frontend' })
+    });
+    const forbiddenStudent = await fetch(`${baseUrl}/api/teacher/students/accounts/reset`, {
+      method: 'POST',
+      headers: jsonHeaders(javaCookie),
+      body: JSON.stringify({ studentIds: [alice.id] })
+    });
+    const reset = await fetch(`${baseUrl}/api/teacher/students/accounts/reset`, {
+      method: 'POST',
+      headers: jsonHeaders(frontCookie),
+      body: JSON.stringify({ className: 'Frontend' })
+    }).then(async (response) => ({ status: response.status, body: await response.json() }));
+    const oldPasswordAfterReset = await fetch(`${baseUrl}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: aliceAccount.username, password: aliceAccount.initialPassword })
+    });
+    const newCookie = await loginAs(baseUrl, reset.body.accounts[0].username, reset.body.accounts[0].initialPassword);
+
+    assert.equal(oldPasswordLogin.status, 200);
+    assert.equal(forbiddenClass.status, 403);
+    assert.equal(forbiddenStudent.status, 403);
+    assert.equal(reset.status, 200);
+    assert.equal(reset.body.accounts.length, 1);
+    assert.equal(reset.body.accounts[0].studentName, 'Alice');
+    assert.equal(reset.body.accounts[0].className, 'Frontend');
+    assert.ok(reset.body.accounts[0].initialPassword);
+    assert.equal(oldPasswordAfterReset.status, 401);
+    assert.match(newCookie, /session=/);
   });
 });
 
