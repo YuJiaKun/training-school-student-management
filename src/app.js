@@ -1762,7 +1762,7 @@ function buildHomeworkAnalytics(db, filters = {}) {
 
   return {
     overview: buildHomeworkOverview(students, assignments, records),
-    classes: buildHomeworkClassAnalytics(activeStudents, db.homeworkAssignments, db.homeworkRecords, classScope.classNames),
+    classes: buildHomeworkClassAnalytics(students, assignments, records, classScope.classNames),
     assignments: assignments.map((assignment) => {
       const assignmentRecords = records.filter((record) => Number(record.assignmentId) === Number(assignment.id));
       return {

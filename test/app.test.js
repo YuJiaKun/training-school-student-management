@@ -879,6 +879,32 @@ test('homework analytics summarizes overview classes assignments and students', 
   });
 });
 
+test('homework analytics class ranking uses the same active record scope as overview', () => {
+  const app = createApp({ db: createDatabase() });
+  const alice = app.createStudent({ name: 'Alice', phone: '13800000001', className: '大数据' });
+  const bob = app.createStudent({ name: 'Bob', phone: '13800000002', className: '大数据' });
+
+  const activeAssignment = app.createHomeworkAssignment({ homeworkName: '0518', className: '大数据', dueDate: '2026-05-20' });
+  const deletedAssignment = app.createHomeworkAssignment({ homeworkName: '历史作业', className: '大数据', dueDate: '2026-05-01' });
+
+  for (const record of activeAssignment.records) {
+    app.updateHomeworkRecord(record.id, { submitStatus: 'submitted', submitAt: '2026-05-18T09:00:00' });
+  }
+  app.deleteHomeworkAssignment(deletedAssignment.assignment.id, { role: 'admin' });
+
+  const analytics = app.getHomeworkAnalytics({ className: '大数据' });
+  const classStats = analytics.classes.find((item) => item.className === '大数据');
+
+  assert.equal(analytics.overview.recordCount, 2);
+  assert.equal(analytics.overview.submittedCount, 2);
+  assert.equal(analytics.overview.completionRate, 100);
+  assert.equal(classStats.recordCount, 2);
+  assert.equal(classStats.submittedCount, 2);
+  assert.equal(classStats.completionRate, 100);
+  assert.equal(alice.className, '大数据');
+  assert.equal(bob.className, '大数据');
+});
+
 test('database state can be saved and loaded from disk', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'student-management-'));
   const filePath = path.join(tempDir, 'data.json');
