@@ -3,8 +3,27 @@
   "version": "1.0.0",
   "private": true,
   "type": "commonjs",
+  "engines": {
+    "node": ">=20 <23"
+  },
   "scripts": {
+    "dev": "vite --config client/vite.config.mjs --host 127.0.0.1",
     "start": "node src/server.js",
-    "test": "node --test"
+    "build": "vite build --config client/vite.config.mjs && npm run check && npm test",
+    "check": "node --check src/app.js && node --check src/db.js && node --check src/server.js && node --check test/app.test.js",
+    "test": "node --test test/app.test.js"
+  },
+  "dependencies": {
+    "@fullcalendar/interaction": "^6.1.20",
+    "@fullcalendar/react": "^6.1.20",
+    "@fullcalendar/timegrid": "^6.1.20",
+    "echarts": "^6.0.0",
+    "lucide-react": "^1.14.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.2.0",
+    "vite": "^7.3.3"
   }
 }
